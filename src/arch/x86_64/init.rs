@@ -8,6 +8,7 @@ use object::{Endianness, Object};
 use std::io;
 use super::mmio::{ VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ, VIRTIO_NET_MMIO_ADDR, VIRTIO_NET_IRQ };
 
+const KVM_SET_TSS_ADDR: libc::Ioctl = _IO(KVMIO, 0x47);
 const KVM_CREATE_IRQCHIP: libc::Ioctl = _IO(KVMIO, 0x60);
 const KVM_CREATE_PIT2: libc::Ioctl = _IOW::<kvm_pit_config>(KVMIO, 0x77);
 const KVM_GET_SUPPORTED_CPUID: libc::Ioctl = _IOWR::<kvm_cpuid2>(KVMIO, 0x05);
@@ -43,7 +44,17 @@ struct HvmMemmapEntry {
     reserved: u32
 }
 
+/* Three pages in the MMIO hole, clear of RAM and devices, where KVM keeps
+ * the TSS it runs real mode with when the host has no unrestricted guest
+ * (no EPT, say). The address is QEMU's. */
+const TSS_ADDR: u64 = 0xfffb_d000;
+
 pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
+    let ret = unsafe { libc::ioctl(vm.fd, KVM_SET_TSS_ADDR, TSS_ADDR) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
     let ret = unsafe { libc::ioctl(vm.fd, KVM_CREATE_IRQCHIP, 0x0) };
     if ret < 0 {
         return Err(io::Error::last_os_error());

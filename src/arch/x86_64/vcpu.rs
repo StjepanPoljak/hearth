@@ -170,14 +170,16 @@ impl VCPU {
         sregs2.gs = data;
         sregs2.ss = data;
 
+        /* VM entry wants a busy TSS in TR, even though the guest has
+         * none yet; with unrestricted guest KVM sets the accessed bit,
+         * which turns a code type into one, but nothing else does. */
         sregs2.tr = kvm_segment {
             base: 0,
             limit: 0x67, // as per Xen project PVH protocol
-
-            g: 0,        // both g and s set to 0 were
-            s: 0,        // experimentally confirmed as required
-            ..code };    // (despite documentation claims on
-                         //  other bits being undefined)
+            type_: 0b1011, // busy 32-bit TSS
+            g: 0,
+            s: 0,          // system segment
+            ..code };
 
         sregs2.cr0 = 0x1; // PE (Protected Mode) bit enabled
         sregs2.cr4 = 0x0; // all bits cleared as per PVH protocol
