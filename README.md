@@ -53,6 +53,20 @@ authentication, so keep it on localhost or tunnel it.
 and `make-alpine-rootfs.sh` an Alpine rootfs for running containers.
 `hearth --help` lists every option.
 
+## Several VMs
+
+Each VM is its own Hearth process. `run-vms.sh` starts several, each with
+its own name, console socket, and optionally its own VNC port, tap and copy
+of a disk image, all under `vms/`:
+
+```sh
+./run-vms.sh --disk rootfs.img --vnc 3 -- --kernel vmlinux
+socat -,raw,echo=0,escape=0x1d UNIX-CONNECT:vms/vm1.sock   # Ctrl-] detaches
+```
+
+`--tap` attaches VM *i* to `tap`*i*, which `sudo ./make-tap.sh up tap`*i*
+creates. Ctrl-C stops them all.
+
 ## Doom
 
 `guests/doom` is doomgeneric with a small libc and a PVH entry stub, drawing
