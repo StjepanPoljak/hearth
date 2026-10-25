@@ -41,6 +41,10 @@ Boot a Linux kernel with a root disk; the serial console is your terminal:
 target/debug/hearth --kernel vmlinux --disk rootfs.img
 ```
 
+`--serial` connects the console elsewhere: `pty` (prints the device to open
+with `screen`), `unix:PATH` (a socket for `socat - UNIX-CONNECT:PATH`; output
+from before a client connects is kept, up to 64 KiB) or `file:PATH`.
+
 Add networking with a tap device (`sudo ./make-tap.sh up`, then `--tap tap0`),
 and a display and keyboard over VNC with `--vnc 127.0.0.1:5900`. VNC has no
 authentication, so keep it on localhost or tunnel it.

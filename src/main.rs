@@ -150,7 +150,13 @@ pub struct Args {
     /// Serve the display and keyboard to VNC clients on this address,
     /// e.g. 127.0.0.1:5900. No authentication: keep it local or tunnel it.
     #[arg(long)]
-    vnc: Option<String>
+    vnc: Option<String>,
+
+    /// Where the serial console goes: stdio (this terminal; Ctrl-A x
+    /// quits), pty (prints the device to open with screen or minicom),
+    /// file:PATH (output only) or unix:PATH (a socket, one client at a time)
+    #[arg(long, value_parser = parse_serial, default_value = "stdio")]
+    serial: SerialSpec
 }
 
 /* Returns the size in bytes. */
@@ -511,8 +517,8 @@ impl VM {
         self.arch_init_mmio_devices(args)
     }
 
-    fn init_io_devices(&mut self, vcpu: &VCPU) -> io::Result<()> {
-        self.arch_init_io_devices(vcpu)
+    fn init_io_devices(&mut self, vcpu: &VCPU, args: &Args) -> io::Result<()> {
+        self.arch_init_io_devices(vcpu, args)
     }
 
     fn add_mmio_device(&mut self, addr: u64, device: Arc<Mutex<dyn MMIODevice>>) {
@@ -740,7 +746,7 @@ fn main() -> io::Result<()> {
     let saved_tty = save_tty();
 
     vm.init_mmio_devices(&args)?;
-    vm.init_io_devices(&vcpu)?;
+    vm.init_io_devices(&vcpu, &args)?;
     if let Some(addr) = &args.vnc {
         start_rfb(addr.as_str(), vm.display.clone(), vm.keyboard.clone())?;
     }

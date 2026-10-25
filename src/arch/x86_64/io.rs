@@ -1,5 +1,5 @@
-use std::io::{ self, Write };
-use crate::{ VM, VCPU, IO, IODevice, KVMIO, TTY, VmControl, start_tty, kvm_irq_level, gpa_to_host, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
+use std::io::{ self };
+use crate::{ VM, VCPU, IO, IODevice, KVMIO, TTY, VmControl, Args, SerialSpec, SerialOut, start_serial, kvm_irq_level, gpa_to_host, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
 use std::collections::VecDeque;
@@ -37,7 +37,8 @@ pub struct UART {
     thr_ipending: bool,
     irq_level: bool,
     vm_fd: libc::c_int,
-    rx: VecDeque<u8>
+    rx: VecDeque<u8>,
+    out: SerialOut
 }
 
 impl TTY for UART {
@@ -61,10 +62,11 @@ impl UART {
         Ok(())
     }
 
-    fn new(vm_fd: libc::c_int, control: Arc<VmControl>) -> io::Result<Arc<Mutex<Self>>> {
-        let uart = Arc::new(Mutex::new(UART { ier: 0x0, fcr: 0x0, lcr: 0x0, mcr: 0x0, lsr: 0x0, msr: 0x0, scr: 0x0, thr_ipending: false, irq_level: false, vm_fd, rx: VecDeque::new() }));
+    fn new(vm_fd: libc::c_int, control: Arc<VmControl>, serial: &SerialSpec) -> io::Result<Arc<Mutex<Self>>> {
+        let uart = Arc::new(Mutex::new(UART { ier: 0x0, fcr: 0x0, lcr: 0x0, mcr: 0x0, lsr: 0x0, msr: 0x0, scr: 0x0, thr_ipending: false, irq_level: false, vm_fd, rx: VecDeque::new(), out: SerialOut::default() }));
 
-        start_tty(uart.clone(), control);
+        let out = start_serial(serial, uart.clone(), control)?;
+        uart.lock().unwrap().out = out;
         Ok(uart)
     }
 }
@@ -82,10 +84,9 @@ impl IODevice for UART {
         match (direction, port) {
             (KVM_EXIT_IO_OUT, 0x3f8) => {
                 if data[0] == b'\n' {
-                    io::stdout().write_all(b"\r").ok();
+                    self.out.write(b"\r");
                 }
-                io::stdout().write_all(&data[0..1]).ok();
-                io::stdout().flush().ok();
+                self.out.write(&data[0..1]);
                 self.thr_ipending = true;
             },
             (KVM_EXIT_IO_IN, 0x3f8) => data[0] = self.rx.pop_front().unwrap_or(0),
@@ -137,8 +138,8 @@ pub enum DeviceId {
 }
 
 impl VM {
-    pub fn arch_init_io_devices(&mut self, vcpu: &VCPU) -> io::Result<()> {
-        let uart = UART::new(self.fd, self.control.clone())?;
+    pub fn arch_init_io_devices(&mut self, vcpu: &VCPU, args: &Args) -> io::Result<()> {
+        let uart = UART::new(self.fd, self.control.clone(), &args.serial)?;
         self.io_devices.insert(DeviceId::Uart as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
         let i8042 = I8042::new(self.fd, self.control.clone());
         self.io_devices.insert(DeviceId::I8042 as u64, i8042.clone() as Arc<Mutex<dyn IODevice>>);
