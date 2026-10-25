@@ -156,7 +156,12 @@ pub struct Args {
     /// quits), pty (prints the device to open with screen or minicom),
     /// file:PATH (output only) or unix:PATH (a socket, one client at a time)
     #[arg(long, value_parser = parse_serial, default_value = "stdio")]
-    serial: SerialSpec
+    serial: SerialSpec,
+
+    /// Name of this VM: the process takes it (as ps and top show it, at
+    /// most 15 bytes), so several VMs can be told apart
+    #[arg(long)]
+    name: Option<String>
 }
 
 /* Returns the size in bytes. */
@@ -718,8 +723,23 @@ unsafe fn install_kick_handler() {
     libc::sigaction(kick_signal(), &sa, std::ptr::null_mut());
 }
 
+/* Names the calling thread, and with it every thread it starts unnamed;
+ * the main thread's name is the process's. The kernel keeps 15 bytes. */
+fn set_process_name(name: &str) -> io::Result<()> {
+    let mut comm = [0u8; 16];
+    let len = name.floor_char_boundary(15);
+    comm[..len].copy_from_slice(&name.as_bytes()[..len]);
+    if unsafe { libc::prctl(libc::PR_SET_NAME, comm.as_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
+    if let Some(name) = &args.name {
+        set_process_name(name)?;
+    }
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
 
@@ -727,7 +747,10 @@ fn main() -> io::Result<()> {
 
     let mut vcpu = vm.create_vcpu(0, kvm_dev.get_kvm_run_size())?;
 
-    println!("\nHearth\r");
+    match &args.name {
+        Some(name) => println!("\nHearth: {}\r", name),
+        None => println!("\nHearth\r")
+    }
 
     arch::arch_init(&kvm_dev, &mut vm, &mut vcpu)?;
 
