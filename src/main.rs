@@ -161,7 +161,26 @@ pub struct Args {
     /// Name of this VM: the process takes it (as ps and top show it, at
     /// most 15 bytes), so several VMs can be told apart
     #[arg(long)]
-    name: Option<String>
+    name: Option<String>,
+
+    /// Log the guest's writes to GPA..GPA+SIZE with KVM's dirty log and
+    /// print the pages written when the VM stops, e.g. 0x200000 or
+    /// 0x200000:64K [default SIZE: one page]
+    #[arg(long, value_parser = parse_dirty_log)]
+    dirty_log: Option<(u64, usize)>
+}
+
+/* GPA[:SIZE], GPA in hex with 0x or decimal, SIZE as for --memory. */
+fn parse_dirty_log(arg: &str) -> Result<(u64, usize), String> {
+    let (gpa, size) = match arg.split_once(':') {
+        Some((gpa, size)) => (gpa, parse_mem_size(size)?),
+        None => (arg, PAGE_SIZE as usize)
+    };
+    let gpa = match gpa.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => gpa.parse()
+    }.map_err(|e| format!("invalid GPA {}: {}", gpa, e))?;
+    Ok((gpa, size))
 }
 
 /* Returns the size in bytes. */
@@ -214,6 +233,7 @@ impl KvmDev {
         Ok(VM {
             fd: vm_fd,
             guest_memory: GuestMemory::new(),
+            slots: vec![],
             next_slot: 0,
             mmio_devices: MMIODevices::new(),
             io_devices: IODevices::new(),
@@ -234,6 +254,9 @@ impl KvmDev {
 pub struct VM {
     pub fd: libc::c_int,
     pub guest_memory: GuestMemory,
+    /* The KVM slots mapping guest_memory: one per region, until
+     * log_dirty_pages splits it. */
+    slots: Vec<Slot>,
     next_slot: u32,
     pub mmio_devices: MMIODevices,
     pub io_devices: IODevices,
@@ -246,10 +269,15 @@ pub struct VM {
 pub struct MemRegion {
     pub mem_ptr: *mut libc::c_void,
     pub mem_size: usize,
-    pub guest_phys_addr: u64,
-    /* The KVM slot covering all of it; None once log_dirty_pages has
-     * split it into several. */
-    slot: Option<u32>
+    pub guest_phys_addr: u64
+}
+
+struct Slot {
+    id: u32,
+    guest_phys_addr: u64,
+    size: u64,
+    userspace_addr: u64,
+    logged: bool
 }
 
 /* Which pages of a memory slot the guest has written since the last
@@ -257,6 +285,8 @@ pub struct MemRegion {
  * first write (or, on Intel, the CPU logs it with PML). */
 pub struct DirtyLog {
     vm_fd: libc::c_int,
+    /* Of the first page; bit n is the page n pages after it. */
+    pub gpa: u64,
     slot: u32,
     pages: usize
 }
@@ -386,10 +416,11 @@ impl VM {
             return Err(io::Error::last_os_error());
         }
 
-        let slot = self.next_slot;
+        let id = self.next_slot;
         self.next_slot += 1;
-        self.set_user_memory_region(slot, 0, guest_phys_addr, mem_size as u64, mem_ptr as u64)?;
-        self.guest_memory.push(Arc::new(MemRegion { mem_ptr, mem_size, guest_phys_addr, slot: Some(slot) }));
+        self.set_user_memory_region(id, 0, guest_phys_addr, mem_size as u64, mem_ptr as u64)?;
+        self.slots.push(Slot { id, guest_phys_addr, size: mem_size as u64, userspace_addr: mem_ptr as u64, logged: false });
+        self.guest_memory.push(Arc::new(MemRegion { mem_ptr, mem_size, guest_phys_addr }));
 
         Ok(self.guest_memory.len() - 1)
     }
@@ -407,46 +438,68 @@ impl VM {
     }
 
     /* Starts logging writes to the pages covering gpa..gpa + size. Logging
-     * is per slot, and a slot cannot be resized, so the region's slot is
-     * deleted and added again as up to three: before, logged, after. The
-     * mapping stays one piece. Once per region, before the vcpus run. */
+     * is per slot, and a slot cannot be resized, so the slot holding the
+     * range is deleted and added again as up to three: before, logged,
+     * after. The mapping stays one piece. The range must not overlap one
+     * logged before; call before the vcpus run. */
     pub fn log_dirty_pages(&mut self, gpa: u64, size: usize) -> io::Result<DirtyLog> {
         let start = gpa & !(PAGE_SIZE - 1);
         let end = (gpa + size as u64).next_multiple_of(PAGE_SIZE);
-        let idx = self.guest_memory.iter()
-            .position(|r| r.guest_phys_addr <= start && end <= r.guest_phys_addr + r.mem_size as u64)
-            .ok_or(io::Error::other(format!("No memory region covers {:#x}..{:#x}.", start, end)))?;
-        let region = &self.guest_memory[idx];
-        let (base, host) = (region.guest_phys_addr, region.mem_ptr as u64);
-        let region_end = base + region.mem_size as u64;
-        let slot = region.slot.ok_or(io::Error::other("Memory region is already split."))?;
+        let idx = self.slots.iter()
+            .position(|s| !s.logged && s.guest_phys_addr <= start && end <= s.guest_phys_addr + s.size)
+            .ok_or(io::Error::other(format!("No unlogged memory slot covers {:#x}..{:#x}.", start, end)))?;
 
-        self.set_user_memory_region(slot, 0, base, 0, host)?;
-        let mut logged = None;
-        let mut free_slot = Some(slot);
-        for (from, to, flags) in [(base, start, 0), (start, end, KVM_MEM_LOG_DIRTY_PAGES), (end, region_end, 0)] {
-            if from == to {
-                continue;
-            }
-            let slot = free_slot.take().unwrap_or_else(|| {
-                self.next_slot += 1;
-                self.next_slot - 1
-            });
-            self.set_user_memory_region(slot, flags, from, to - from, host + (from - base))?;
-            if flags != 0 {
-                logged = Some(slot);
-            }
-        }
-        Arc::get_mut(&mut self.guest_memory[idx])
-            .ok_or(io::Error::other("Memory region is already shared."))?
-            .slot = None;
-
-        /* Its own fd, as frontends may fetch it after the VM is dropped. */
+        /* Its own fd, as frontends may fetch it after the VM is dropped.
+         * Taken first, so a failure here leaves the slots untouched. */
         let vm_fd = unsafe { libc::dup(self.fd) };
         if vm_fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(DirtyLog { vm_fd, slot: logged.unwrap(), pages: ((end - start) / PAGE_SIZE) as usize })
+
+        let old = &self.slots[idx];
+        let (old_id, old_gpa, old_size, old_host) = (old.id, old.guest_phys_addr, old.size, old.userspace_addr);
+        let saved_next_slot = self.next_slot;
+        let mut free_id = Some(old_id);
+        let pieces: Vec<Slot> = [(old_gpa, start, false), (start, end, true), (end, old_gpa + old_size, false)]
+            .into_iter()
+            .filter(|(from, to, _)| from != to)
+            .map(|(from, to, log)| {
+                let id = free_id.take().unwrap_or_else(|| {
+                    self.next_slot += 1;
+                    self.next_slot - 1
+                });
+                Slot { id, guest_phys_addr: from, size: to - from,
+                       userspace_addr: old_host + (from - old_gpa), logged: log }
+            })
+            .collect();
+
+        if let Err(e) = self.replace_slot(old_id, old_gpa, old_host, &pieces) {
+            /* Put KVM back as it was: drop the pieces added, re-add the
+             * whole slot. Best effort, the first error is the one returned. */
+            for piece in &pieces {
+                let _ = self.set_user_memory_region(piece.id, 0, piece.guest_phys_addr, 0, piece.userspace_addr);
+            }
+            let _ = self.set_user_memory_region(old_id, 0, old_gpa, old_size, old_host);
+            self.next_slot = saved_next_slot;
+            unsafe { libc::close(vm_fd) };
+            return Err(e);
+        }
+
+        let logged = pieces.iter().find(|s| s.logged).unwrap().id;
+        self.slots.remove(idx);
+        self.slots.extend(pieces);
+        Ok(DirtyLog { vm_fd, gpa: start, slot: logged, pages: ((end - start) / PAGE_SIZE) as usize })
+    }
+
+    /* Deletes slot old_id and adds pieces in its place. On error, KVM may
+     * hold some of the pieces; the caller undoes it. */
+    fn replace_slot(&self, old_id: u32, old_gpa: u64, old_host: u64, pieces: &[Slot]) -> io::Result<()> {
+        self.set_user_memory_region(old_id, 0, old_gpa, 0, old_host)?;
+        for piece in pieces {
+            let flags = if piece.logged { KVM_MEM_LOG_DIRTY_PAGES } else { 0 };
+            self.set_user_memory_region(piece.id, flags, piece.guest_phys_addr, piece.size, piece.userspace_addr)?;
+        }
+        Ok(())
     }
 
     /* Makes KVM queue the guest's writes to ports..ports + len in the
@@ -679,6 +732,7 @@ impl VCPU {
                     let reason = fail_entry.hardware_entry_failure_reason;
                     let cpu = fail_entry.cpu;
                     println!("Fail entry: reason={:#x}, cpu={}", reason, cpu);
+                    self.print_regs()?;
                     break;
                 }
                 _ => {
@@ -735,6 +789,21 @@ fn set_process_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn print_dirty_pages(log: &DirtyLog) -> io::Result<()> {
+    let bitmap = log.fetch()?;
+    let pages: Vec<u64> = (0..bitmap.len() * 64)
+        .filter(|n| bitmap[n / 64] & (1 << (n % 64)) != 0)
+        .map(|n| log.gpa + n as u64 * PAGE_SIZE)
+        .collect();
+    if pages.is_empty() {
+        println!("Dirty log: no page written.\r");
+    }
+    for page in pages {
+        println!("Dirty log: {:#x} written.\r", page);
+    }
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
     if let Some(name) = &args.name {
@@ -770,6 +839,10 @@ fn main() -> io::Result<()> {
 
     vm.init_mmio_devices(&args)?;
     vm.init_io_devices(&vcpu, &args)?;
+    let dirty_log = match args.dirty_log {
+        Some((gpa, size)) => Some(vm.log_dirty_pages(gpa, size)?),
+        None => None
+    };
     if let Some(addr) = &args.vnc {
         start_rfb(addr.as_str(), vm.display.clone(), vm.keyboard.clone())?;
     }
@@ -777,6 +850,12 @@ fn main() -> io::Result<()> {
     let res = vm.run(vec![vcpu]);
     if let Some(tty) = saved_tty {
         restore_tty(&tty);
+    }
+    if let Some(log) = dirty_log {
+        /* The VM's own error matters more; only report this one. */
+        if let Err(e) = print_dirty_pages(&log) {
+            eprintln!("Dirty log: cannot fetch: {}\r", e);
+        }
     }
     res
 }
