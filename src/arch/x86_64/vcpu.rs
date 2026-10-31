@@ -141,10 +141,11 @@ impl VCPU {
             base: 0,
             limit: 0xffff_ffff,
             selector: 1 << 3,
-            type_: 0b1010, // 3rd bit: code
+            type_: 0b1011, // 3rd bit: code
                            // 2nd bit: not comforming
                            // 1st bit: read/write
-                           // 0th bit: not accessed
+                           // 0th bit: accessed (VM entry wants it
+                           // without unrestricted guest)
             present: 1,
             dpl: 0, // descriptor privilege level (0: kernel .. 3: userspace)
             db: 1,  // default operand / address size (0: 16bit, 1: 32bit)
@@ -157,10 +158,10 @@ impl VCPU {
         };
         let data = kvm_segment {
             selector: 2 << 3,
-            type_: 0b0010, // 3rd bit: data
+            type_: 0b0011, // 3rd bit: data
                            // 2nd bit: not comforming
                            // 1st bit: read/write
-                           // 0th bit: not accessed
+                           // 0th bit: accessed
             ..code };
 
         sregs2.cs = code;
@@ -171,8 +172,7 @@ impl VCPU {
         sregs2.ss = data;
 
         /* VM entry wants a busy TSS in TR, even though the guest has
-         * none yet; with unrestricted guest KVM sets the accessed bit,
-         * which turns a code type into one, but nothing else does. */
+         * none yet. */
         sregs2.tr = kvm_segment {
             base: 0,
             limit: 0x67, // as per Xen project PVH protocol
