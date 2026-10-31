@@ -70,6 +70,17 @@ pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
     Ok(())
 }
 
+/* Debug aid, not called: prints the function and index of each CPUID
+ * entry, e.g. from arch_init after KVM_GET_SUPPORTED_CPUID. */
+#[allow(dead_code)]
+unsafe fn print_cpuid(cpuid2: *const kvm_cpuid2) {
+    let nent = unsafe { (*cpuid2).nent as usize };
+    let entries = unsafe { (*cpuid2).__bindgen_anon_1.entries.as_slice(nent) };
+    for entry in entries {
+        println!("{:#x} {:#x}", entry.function, entry.index);
+    }
+}
+
 pub fn arch_init(kvm_dev: &KvmDev, _vm: &mut VM, vcpu: &mut VCPU) -> io::Result<()> {
     let mut cpuid2_buf = vec![0u32; size_of::<kvm_cpuid2>() + 256 * size_of::<kvm_cpuid_entry2>()];
     let cpuid2 = cpuid2_buf.as_mut_ptr() as *mut kvm_cpuid2;
@@ -78,14 +89,6 @@ pub fn arch_init(kvm_dev: &KvmDev, _vm: &mut VM, vcpu: &mut VCPU) -> io::Result<
     let ret = unsafe { libc::ioctl(kvm_dev.fd(), KVM_GET_SUPPORTED_CPUID, cpuid2) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
-    }
-
-    let nent = unsafe { (*cpuid2).nent as usize };
-    let entries = unsafe { (*cpuid2).__bindgen_anon_1.entries.as_slice(nent) };
-
-    for i in 0..nent {
-        let entry = entries[i as usize];
-        println!("{:#x} {:#x}", entry.function, entry.index);
     }
 
     let ret = unsafe { libc::ioctl(vcpu.fd, KVM_SET_CPUID2, cpuid2) };
