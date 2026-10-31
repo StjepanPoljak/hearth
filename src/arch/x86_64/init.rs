@@ -1,5 +1,5 @@
 use crate::{ kvm_cpuid2, kvm_cpuid_entry2, kvm_pit_config };
-use crate::{ VCPU, VM, KvmDev, Args, KVMIO };
+use crate::{ VCPU, VM, KvmDev, Args, KVMIO, PAGE_SIZE };
 use crate::{ read_le64, read_le32, load_elf };
 use libc::{_IOW, _IO, _IOWR};
 
@@ -48,6 +48,9 @@ struct HvmMemmapEntry {
  * the TSS it runs real mode with when the host has no unrestricted guest
  * (no EPT, say). The address is QEMU's. */
 const TSS_ADDR: u64 = 0xfffb_d000;
+
+/* Where the PVH start info goes, followed by what it points at. */
+const HVM_START_INFO_ADDR: u64 = 0x10000;
 
 pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
     let ret = unsafe { libc::ioctl(vm.fd, KVM_SET_TSS_ADDR, TSS_ADDR) };
@@ -150,30 +153,26 @@ impl VM {
         if let Some(append) = &args.append {
             cmdline = format!("{} {}", cmdline, append);
         }
+        /* Boot info goes in low RAM below the EBDA; modules go after the
+         * kernel, up to the end of RAM below 4G. */
+        let region = self.mem_region_mut(linux_mem_idx)?;
+        let boot_alloc = region.add_bump_allocator(HVM_START_INFO_ADDR, EBDA_START)?;
+        let module_alloc = region.add_bump_allocator(last_addr.next_multiple_of(PAGE_SIZE), ram_size.min(MMIO_START))?;
+
         let mut modlist_entries = vec![];
+        if let Some(initramfs_path) = &args.initramfs {
+            /* The module's command line carries its file name, for guests
+             * that look modules up by name; Linux ignores it. */
+            let module_name = std::path::Path::new(initramfs_path)
+                .file_name().map_or(String::new(), |name| name.to_string_lossy().into_owned());
+            let initramfs = std::fs::read(initramfs_path)?;
 
-        let hvm_base: u64 = 0x10000;
-
-        match &args.initramfs {
-            Some(initramfs_path) => {
-                /* The module's command line carries its file name, for guests
-                 * that look modules up by name; Linux ignores it. */
-                let module_name = std::path::Path::new(initramfs_path)
-                    .file_name().map_or(String::new(), |name| name.to_string_lossy().into_owned());
-                let initrd_cmdline = format!("{}\0", module_name);
-                let initrd_cmdline_start = (last_addr + 0xfff) & !0xfff;
-                self.load_data_to_memory(linux_mem_idx, initrd_cmdline.as_bytes().to_vec(), initrd_cmdline_start)?;
-
-                let initrd_start = ((initrd_cmdline.len() as u64) + initrd_cmdline_start + 0xfff) & !0xfff;
-                let initramfs_size = self.load_file_to_memory(linux_mem_idx, &initramfs_path, initrd_start).unwrap();
-                modlist_entries.push(HvmModlistEntry {
-                    paddr: initrd_start as u64,
-                    size: initramfs_size as u64,
-                    cmdline_paddr: initrd_cmdline_start as u64,
-                    reserved: 0u64
-                });
-            },
-            None => ()
+            let modules = &mut region.allocators[module_alloc];
+            let cmdline_paddr = modules.push(format!("{}\0", module_name).as_bytes())?;
+            modules.align(PAGE_SIZE)?;
+            println!("Loading {:?} at {:#x}...\r", initramfs_path, modules.next());
+            let paddr = modules.push(&initramfs)?;
+            modlist_entries.push(HvmModlistEntry { paddr, size: initramfs.len() as u64, cmdline_paddr, reserved: 0 });
         }
 
         let mut memmap_entries = vec![
@@ -185,13 +184,6 @@ impl VM {
             memmap_entries.push(HvmMemmapEntry { addr: HIGH_RAM_START, size: ram_size - MMIO_START, type_: 1, reserved: 0 });
         }
 
-        let mut cmdline_start = hvm_base + std::mem::size_of::<HvmStartInfo>() as u64;
-        cmdline_start = (cmdline_start + 0xfff) & !0xfff;
-        let cmdline_size = cmdline.len() as u64;
-        self.load_data_to_memory(linux_mem_idx, cmdline.as_bytes().to_vec(), cmdline_start)?;
-
-        let mut memmap_start = cmdline_start + cmdline_size;
-        memmap_start = (memmap_start + 0xfff) & !0xfff;
         let memmap_size = memmap_entries.len() * std::mem::size_of::<HvmMemmapEntry>();
         let mut memmap_buf = Vec::with_capacity(memmap_size);
         for e in &memmap_entries {
@@ -200,10 +192,7 @@ impl VM {
             memmap_buf.extend_from_slice(&e.type_.to_le_bytes());
             memmap_buf.extend_from_slice(&e.reserved.to_le_bytes());
         }
-        self.load_data_to_memory(linux_mem_idx, memmap_buf, memmap_start)?;
 
-        let mut modlist_start = memmap_start + memmap_size as u64;
-        modlist_start = (modlist_start + 0xfff) & !0xfff;
         let modlist_size = modlist_entries.len() * std::mem::size_of::<HvmModlistEntry>();
         let mut modlist_buf = Vec::with_capacity(modlist_size);
         for e in &modlist_entries {
@@ -212,7 +201,17 @@ impl VM {
             modlist_buf.extend_from_slice(&e.cmdline_paddr.to_le_bytes());
             modlist_buf.extend_from_slice(&e.reserved.to_le_bytes());
         }
-        self.load_data_to_memory(linux_mem_idx, modlist_buf, modlist_start)?;
+
+        /* The start info points at the rest, so it is filled in last. */
+        let boot = &mut region.allocators[boot_alloc];
+        let start_info_paddr = boot.next();
+        let start_info = boot.reserve(std::mem::size_of::<HvmStartInfo>())?;
+        boot.align(PAGE_SIZE)?;
+        let cmdline_start = boot.push(format!("{}\0", cmdline).as_bytes())?;
+        boot.align(PAGE_SIZE)?;
+        let memmap_start = boot.push(&memmap_buf)?;
+        boot.align(PAGE_SIZE)?;
+        let modlist_start = boot.push(&modlist_buf)?;
 
         let mut magic = [ 'x', 'E', 'n', '3' ].map(|c| c as u8); magic[1] |= 0x80;
         let hvm_start_info = HvmStartInfo {
@@ -227,15 +226,11 @@ impl VM {
             memmap_entries: memmap_entries.len() as u32,
             reserved: 0u32
         };
-        let hvm_mem_src = unsafe { std::slice::from_raw_parts(
-            &hvm_start_info as *const HvmStartInfo as *const u8,
-            std::mem::size_of::<HvmStartInfo>(),
-        ) };
-        self.load_data_to_memory(linux_mem_idx, hvm_mem_src.to_vec(), hvm_base)?;
+        unsafe { std::ptr::write_unaligned(start_info.cast::<HvmStartInfo>(), hvm_start_info) };
 
         let mut regs = vcpu.get_regs()?;
         regs.rip = pvh_entrypoint;
-        regs.rbx = hvm_base;
+        regs.rbx = start_info_paddr;
         regs.rflags = 0x2; // bits 17, 9 and 8 cleared, all other unspecified
         vcpu.set_regs(regs)?;
         regs.print();

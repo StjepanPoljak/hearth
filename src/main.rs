@@ -269,7 +269,30 @@ pub struct VM {
 pub struct MemRegion {
     pub mem_ptr: *mut libc::c_void,
     pub mem_size: usize,
-    pub guest_phys_addr: u64
+    pub guest_phys_addr: u64,
+    /* Parts of the region the VMM fills before the guest runs; see
+     * add_bump_allocator. */
+    pub allocators: Vec<BumpAllocator>
+}
+
+impl MemRegion {
+    /* Adds an allocator handing out gpa_start..gpa_end, which must lie in
+     * this region and clear of its other allocators. Returns its index in
+     * allocators. */
+    pub fn add_bump_allocator(&mut self, gpa_start: u64, gpa_end: u64) -> io::Result<usize> {
+        let region_end = self.guest_phys_addr + self.mem_size as u64;
+        if gpa_start > gpa_end || gpa_start < self.guest_phys_addr || gpa_end > region_end {
+            return Err(io::Error::other(format!("Allocator {:#x}..{:#x} is not inside region {:#x}..{:#x}.",
+                                                gpa_start, gpa_end, self.guest_phys_addr, region_end)));
+        }
+        if let Some(other) = self.allocators.iter().find(|a| gpa_start < a.gpa_end() && a.gpa_start() < gpa_end) {
+            return Err(io::Error::other(format!("Allocator {:#x}..{:#x} overlaps {:#x}..{:#x}.",
+                                                gpa_start, gpa_end, other.gpa_start(), other.gpa_end())));
+        }
+        let host_start = unsafe { (self.mem_ptr as *mut u8).add((gpa_start - self.guest_phys_addr) as usize) };
+        self.allocators.push(BumpAllocator::new(gpa_start, gpa_end, host_start));
+        Ok(self.allocators.len() - 1)
+    }
 }
 
 struct Slot {
@@ -420,7 +443,7 @@ impl VM {
         self.next_slot += 1;
         self.set_user_memory_region(id, 0, guest_phys_addr, mem_size as u64, mem_ptr as u64)?;
         self.slots.push(Slot { id, guest_phys_addr, size: mem_size as u64, userspace_addr: mem_ptr as u64, logged: false });
-        self.guest_memory.push(Arc::new(MemRegion { mem_ptr, mem_size, guest_phys_addr }));
+        self.guest_memory.push(Arc::new(MemRegion { mem_ptr, mem_size, guest_phys_addr, allocators: vec![] }));
 
         Ok(self.guest_memory.len() - 1)
     }
@@ -565,6 +588,17 @@ impl VM {
         println!("Loading {:?} at {:#x}...\r", path, offset + self.guest_memory[mem_region_idx].guest_phys_addr);
 
         self.load_data_to_memory(mem_region_idx, res, offset)
+    }
+
+    /* The region to add allocators to or fill through them: only while
+     * nothing else holds it, i.e. while the VM is being set up. Only the
+     * x86 loader uses allocators so far. */
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    fn mem_region_mut(&mut self, mem_region_idx: usize) -> io::Result<&mut MemRegion> {
+        let region = self.guest_memory
+            .get_mut(mem_region_idx)
+            .ok_or(io::Error::other("Index exceeds memory region vector."))?;
+        Arc::get_mut(region).ok_or(io::Error::other("Memory region is already shared."))
     }
 
     fn load_linux(&mut self, vcpu: &mut VCPU, args: &Args) -> io::Result<()> {
