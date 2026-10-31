@@ -1,11 +1,21 @@
-"""Hearth title screen: 320x200, <=256 colours, mode 13h style."""
+"""Hearth title screen: 320x200, <=256 colours, mode 13h style.
+
+Usage: hearth.py out.png out-4x.png
+       hearth.py --social out.png    1280x640 card: the same room, widened
+"""
 import sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 320, 200
+SOCIAL = sys.argv[1] == '--social'
+# The scene is laid out on 320x200; a social card extends the room by OX
+# and OY on each side, and is drawn at 3x and cropped to 1280x640.
+OX, OY = (54, 7) if SOCIAL else (0, 0)
+W, H = 320 + 2 * OX, 200 + 2 * OY
 rng = np.random.default_rng(13)
 yy, xx = np.mgrid[0:H, 0:W]
+yy -= OY
+xx -= OX
 
 
 def ramp(*hexes):
@@ -90,7 +100,7 @@ def blocks(region, x0, y0, rows, wmin, wmax, base, spread, seed):
     a = np.zeros((H, W))
     y = y0
     for rh in rows:
-        x = x0 - r.integers(0, wmax)
+        x = x0 - OX - r.integers(0, wmax)
         while x < W:
             bw = int(r.integers(wmin, wmax + 1))
             v = base + r.uniform(-spread, spread)
@@ -113,7 +123,7 @@ blocks(np.ones((H, W), bool), 0, 6, [11, 12, 10, 12, 11, 12, 10, 12, 11, 12, 11,
        14, 28, 0.52, 0.09, 1)
 
 # ceiling beam
-beam = rect(0, 0, W, 7)
+beam = yy < 7
 put(beam, 'wood', 0.55 + 0.1 * np.sin(xx / 7.0) * np.sin(xx / 23.0) - 0.25 * (yy == 6))
 
 # --------------------------------------------------------------------- floor
@@ -134,7 +144,7 @@ for b in range(-12, 13):                          # butt joints
     jy = int(r.integers(FY + 4, H))
     fa = np.where((board == b) & (yy == jy), 0.12, fa)
 put(floor, 'wood', fa)
-put(rect(0, FY - 3, W, FY), 'wood', 0.3 - 0.12 * (yy == FY - 1))   # skirting
+put((yy >= FY - 3) & (yy < FY), 'wood', 0.3 - 0.12 * (yy == FY - 1))   # skirting
 
 # ---------------------------------------------------------------- fireplace
 CX = 160
@@ -237,7 +247,7 @@ put(fl, 'fire', np.clip(0.1 + flame * 1.15, 0, 1), True)
 # sparks
 for _ in range(16):
     sx, sy = int(rng.integers(140, 182)), int(rng.integers(98, 112))
-    if opening[sy, sx]:
+    if opening[sy + OY, sx + OX]:
         put((xx == sx) & (yy == sy), 'fire', rng.uniform(0.6, 0.95), True)
 
 # --------------------------------------------------------------- the window
@@ -252,7 +262,7 @@ sky = np.clip((yy - WY0) / (WY1 - WY0), 0, 1)
 put(win, 'sky', 0.15 + sky * 0.75, True)
 for _ in range(26):
     sx, sy = int(rng.integers(WX0, WX1)), int(rng.integers(WY0, WY1 - 20))
-    if win[sy, sx]:
+    if win[sy + OY, sx + OX]:
         put((xx == sx) & (yy == sy), 'moon', rng.uniform(0.4, 0.9), True)
 moon = ellipse(57, 62, 7, 7)
 put(moon & win, 'moon', 0.95 - 0.35 * ellipse(54.5, 60, 6.5, 6.5), True)
@@ -434,7 +444,7 @@ for cx_, cy_ in ((118, 56), (203, 59)):
 L += 0.12 * np.exp(-((xx - 49) ** 2 / 900 + (yy - 135) ** 2 / 80))      # moon on the floor
 # soft occlusion under the mantel and inside the firebox edges
 L -= 0.18 * rect(108, 84, 212, 92)
-L = np.where(rect(0, 0, W, 7), L * 0.7, L)
+L = np.where(yy < 7, L * 0.7, L)
 
 # ------------------------------------------------------------------- title
 font = ImageFont.truetype('/usr/share/fonts/opentype/mathjax/MathJax_Fraktur-Bold.otf', 46)
@@ -444,7 +454,7 @@ ta = np.array(ti) > 110
 ys, xs = np.nonzero(ta)
 ta = ta[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 th, tw = ta.shape
-TX, TY = (W - tw) // 2, 10
+TX, TY = (W - tw) // 2, 10 + OY
 T = np.zeros((H, W), bool)
 T[TY:TY + th, TX:TX + tw] = ta
 O = dilate(T) & ~T
@@ -458,7 +468,7 @@ ga = np.where(edge(T) & shift(~T, 0, 1), np.minimum(ga + 0.2, 1), ga)     # top 
 ga = np.where(edge(T) & shift(~T, 0, -1), ga - 0.25, ga)                  # bottom dark
 put(T, 'gold', np.clip(ga, 0, 1), True)
 # a few sparkles on the gilt
-for (sx, sy) in [(TX + 16, TY + 4), (TX + tw - 14, TY + 3)]:
+for (sx, sy) in [(TX - OX + 16, TY - OY + 4), (TX - OX + tw - 14, TY - OY + 3)]:
     put(((xx == sx) & (np.abs(yy - sy) <= 2)) | ((yy == sy) & (np.abs(xx - sx) <= 2)),
         'gold', 1.0, True)
 
@@ -482,6 +492,11 @@ out = (offs[mat] + idx).astype(np.uint8)
 img = Image.fromarray(out, 'P')
 flat = [c for rgb in pal for c in rgb]
 img.putpalette(flat + [0] * (768 - len(flat)))
-img.save(sys.argv[1])
-img.resize((W * 4, H * 4), Image.NEAREST).save(sys.argv[2])
+if SOCIAL:
+    big = img.resize((W * 3, H * 3), Image.NEAREST)
+    x0, y0 = (W * 3 - 1280) // 2, (H * 3 - 640) // 2
+    big.crop((x0, y0, x0 + 1280, y0 + 640)).save(sys.argv[2])
+else:
+    img.save(sys.argv[1])
+    img.resize((W * 4, H * 4), Image.NEAREST).save(sys.argv[2])
 print('colours used:', len(np.unique(out)), 'of', len(pal))
