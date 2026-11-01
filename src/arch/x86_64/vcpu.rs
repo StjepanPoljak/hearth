@@ -1,22 +1,33 @@
 use std::io;
 use libc::{ _IOW, _IOR };
 
-use crate::{kvm_regs, kvm_sregs2, kvm_dtable, kvm_segment};
+use crate::{kvm_regs, kvm_sregs2, kvm_dtable, kvm_segment, kvm_run, kvm_guest_debug, kvm_debugregs};
+use crate::{KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_USE_HW_BP, KVM_GUESTDBG_INJECT_DB};
 use crate::KVMIO;
-use crate::VCPU;
+use crate::{VCPU, Breakpoint};
 
 const KVM_GET_SREGS2: libc::Ioctl = _IOR::<kvm_sregs2>(KVMIO, 0xcc);
 const KVM_SET_SREGS2: libc::Ioctl = _IOW::<kvm_sregs2>(KVMIO, 0xcd);
 const KVM_GET_REGS: libc::Ioctl = _IOR::<kvm_regs>(KVMIO, 0x81);
 const KVM_SET_REGS: libc::Ioctl = _IOW::<kvm_regs>(KVMIO, 0x82);
+const KVM_SET_GUEST_DEBUG: libc::Ioctl = _IOW::<kvm_guest_debug>(KVMIO, 0x9b);
+const KVM_GET_DEBUGREGS: libc::Ioctl = _IOR::<kvm_debugregs>(KVMIO, 0xa1);
+const KVM_SET_DEBUGREGS: libc::Ioctl = _IOW::<kvm_debugregs>(KVMIO, 0xa2);
+
+/* DR0..DR3, one breakpoint each. */
+const MAX_BREAKPOINTS: usize = 4;
+/* Suppresses instruction breakpoints for the next instruction. */
+const RFLAGS_RF: u64 = 1 << 16;
+const DB_VECTOR: u32 = 1;
 
 impl kvm_regs {
     pub fn print(&self) {
-       println!("RAX={:#x}\tRBX={:#x}\tRCX={:#x}\tRDX={:#x}", self.rax, self.rbx, self.rcx, self.rdx);
-       println!("RSI={:#x}\tRDI={:#x}\tRSP={:#x}\tRBP={:#x}", self.rsi, self.rdi, self.rsp, self.rbp);
-       println!("R8={:#x}\tR9={:#x}\tR10={:#x}\tR11={:#x}", self.r8, self.r9, self.r10, self.r11);
-       println!("R12={:#x}\tR13={:#x}\tR14={:#x}\tR15={:#x}", self.r12, self.r13, self.r14, self.r15);
-       println!("RIP={:#x}\tRFLAGS={:#x}", self.rip, self.rflags);
+       /* \r, as the serial console may have the terminal raw. */
+       println!("RAX={:#x}\tRBX={:#x}\tRCX={:#x}\tRDX={:#x}\r", self.rax, self.rbx, self.rcx, self.rdx);
+       println!("RSI={:#x}\tRDI={:#x}\tRSP={:#x}\tRBP={:#x}\r", self.rsi, self.rdi, self.rsp, self.rbp);
+       println!("R8={:#x}\tR9={:#x}\tR10={:#x}\tR11={:#x}\r", self.r8, self.r9, self.r10, self.r11);
+       println!("R12={:#x}\tR13={:#x}\tR14={:#x}\tR15={:#x}\r", self.r12, self.r13, self.r14, self.r15);
+       println!("RIP={:#x}\tRFLAGS={:#x}\r", self.rip, self.rflags);
     }
 }
 
@@ -123,6 +134,72 @@ impl VCPU {
     pub fn get_ip(&mut self) -> io::Result<usize> {
         let rip = self.get_regs()?.rip;
         Ok(rip as usize)
+    }
+
+    /* Makes the vcpu exit with KVM_EXIT_DEBUG before executing any of
+     * the breakpoints' addresses, using the debug registers. KVM keeps
+     * the guest's own debug registers aside meanwhile. */
+    pub fn set_breakpoints(&mut self, breakpoints: Vec<Breakpoint>) -> io::Result<()> {
+        if breakpoints.len() > MAX_BREAKPOINTS {
+            return Err(io::Error::other(format!("At most {} breakpoints, {} given.", MAX_BREAKPOINTS, breakpoints.len())));
+        }
+        self.breakpoints = breakpoints;
+        self.set_guest_debug(0)
+    }
+
+    fn set_guest_debug(&self, extra_control: u32) -> io::Result<()> {
+        let mut dbg: kvm_guest_debug = unsafe { std::mem::zeroed() };
+        dbg.control = KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP | extra_control;
+        /* DR7: bit 10 is reserved as 1, bit 9 (GE) is what QEMU sets too. */
+        let mut dr7 = 0x600;
+        for (i, bp) in self.breakpoints.iter().enumerate() {
+            dbg.arch.debugreg[i] = bp.addr;
+            /* G<i>; R/W<i> and LEN<i> of 0 mean instruction execution. */
+            dr7 |= 2 << (2 * i);
+        }
+        dbg.arch.debugreg[7] = dr7;
+        let ret = unsafe { libc::ioctl(self.fd, KVM_SET_GUEST_DEBUG, &dbg) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /* With breakpoints set, KVM hands every #DB to us, the guest's own
+     * too (a single step it asked for, say). Reports ours and resumes;
+     * gives the others back to the guest. */
+    pub fn handle_debug_exit(&mut self) -> io::Result<()> {
+        let debug = unsafe { (*(self.kvm_run_mem as *mut kvm_run)).__bindgen_anon_1.debug.arch };
+        /* B0..B3 of DR6 tell which debug register matched. */
+        let hit = (0..self.breakpoints.len())
+            .find(|i| debug.exception == DB_VECTOR && debug.dr6 & (1 << i) != 0);
+        let Some(i) = hit else {
+            return self.reinject_debug_exception(debug.dr6);
+        };
+
+        let bp = &mut self.breakpoints[i];
+        bp.hits += 1;
+        println!("Breakpoint {} ({:#x}) hit, {} time(s):\r", bp.label, debug.pc, bp.hits);
+        let mut regs = self.get_regs()?;
+        regs.print();
+        /* The breakpoint is a fault, taken before the instruction runs:
+         * without RF it would fire again on resuming. */
+        regs.rflags |= RFLAGS_RF;
+        self.set_regs(regs)
+    }
+
+    /* The guest reads DR6 in its #DB handler, so it gets the one the
+     * exception came with. */
+    fn reinject_debug_exception(&self, dr6: u64) -> io::Result<()> {
+        let mut debugregs: kvm_debugregs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(self.fd, KVM_GET_DEBUGREGS, &mut debugregs) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        debugregs.dr6 = dr6;
+        if unsafe { libc::ioctl(self.fd, KVM_SET_DEBUGREGS, &debugregs) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.set_guest_debug(KVM_GUESTDBG_INJECT_DB)
     }
 
     pub fn print_regs(&mut self) -> io::Result<()> {

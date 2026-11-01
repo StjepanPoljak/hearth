@@ -167,7 +167,14 @@ pub struct Args {
     /// print the pages written when the VM stops, e.g. 0x200000 or
     /// 0x200000:64K [default SIZE: one page]
     #[arg(long, value_parser = parse_dirty_log)]
-    dirty_log: Option<(u64, usize)>
+    dirty_log: Option<(u64, usize)>,
+
+    /// Report each time the guest is about to execute this address, with
+    /// its registers, and go on: a symbol of the --linux ELF, optionally
+    /// +OFFSET, or an address, e.g. start_kernel or 0xffffffff81000000.
+    /// Repeat for more, at most 4 (x86 only, hardware breakpoints)
+    #[arg(long = "break", value_name = "SYMBOL[+OFFSET]|ADDRESS")]
+    breakpoints: Vec<String>
 }
 
 /* GPA[:SIZE], GPA in hex with 0x or decimal, SIZE as for --memory. */
@@ -176,10 +183,7 @@ fn parse_dirty_log(arg: &str) -> Result<(u64, usize), String> {
         Some((gpa, size)) => (gpa, parse_mem_size(size)?),
         None => (arg, PAGE_SIZE as usize)
     };
-    let gpa = match gpa.strip_prefix("0x") {
-        Some(hex) => u64::from_str_radix(hex, 16),
-        None => gpa.parse()
-    }.map_err(|e| format!("invalid GPA {}: {}", gpa, e))?;
+    let gpa = parse_number(gpa).map_err(|e| format!("invalid GPA: {}", e))?;
     Ok((gpa, size))
 }
 
@@ -419,7 +423,7 @@ impl VM {
             return Err(io::Error::last_os_error());
         }
 
-        let mut vcpu = VCPU { id, fd: vcpu_fd, kvm_run_mem: std::ptr::null_mut(), kvm_run_size };
+        let mut vcpu = VCPU { id, fd: vcpu_fd, kvm_run_mem: std::ptr::null_mut(), kvm_run_size, breakpoints: vec![] };
         vcpu.map_kvm_run()?;
         Ok(vcpu)
     }
@@ -680,7 +684,10 @@ pub struct VCPU {
     pub id: u32,
     pub fd: libc::c_int,
     pub kvm_run_mem: *mut libc::c_void,
-    kvm_run_size: usize
+    kvm_run_size: usize,
+    /* Set by set_breakpoints, in debug register order on x86. */
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    breakpoints: Vec<Breakpoint>
 }
 
 /* kvm_run is only touched by the thread running the vcpu. */
@@ -749,6 +756,9 @@ impl VCPU {
                 KVM_EXIT_MMIO => {
                     let mmio = unsafe { &mut (*run).__bindgen_anon_1.mmio };
                     vm.handle_mmio(mmio)?
+                }
+                KVM_EXIT_DEBUG => {
+                    self.handle_debug_exit()?;
                 }
                 KVM_EXIT_HLT => {
                     println!("Guest halted.");
@@ -865,6 +875,20 @@ fn main() -> io::Result<()> {
     } else if let Some(binary) = &args.binary {
         let mem_region_idx = vm.add_mem_region(args.memory.unwrap_or(256 << 10), 0x0)?;
         vm.load_file_to_memory(mem_region_idx, binary, args.load_addr)?;
+    }
+
+    if !args.breakpoints.is_empty() {
+        let elf_data = match &args.linux {
+            Some(path) => Some(std::fs::read(path)?),
+            None => None
+        };
+        let breakpoints = args.breakpoints.iter()
+            .map(|spec| resolve_breakpoint(spec, elf_data.as_deref()))
+            .collect::<io::Result<Vec<_>>>()?;
+        vcpu.set_breakpoints(breakpoints)?;
+        for bp in &vcpu.breakpoints {
+            println!("Breakpoint {} at {:#x}.\r", bp.label, bp.addr);
+        }
     }
 
     /* The serial frontend's thread may never get to restore the terminal

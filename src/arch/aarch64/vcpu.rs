@@ -5,7 +5,7 @@ use crate::{ kvm_vcpu_init, kvm_one_reg, KVM_REG_ARM64, KVM_REG_SIZE_U64, KVM_RE
 use libc::_IOW;
 
 use crate::KVMIO;
-use crate::VCPU;
+use crate::{ VCPU, Breakpoint };
 
 const KVM_ARM_VCPU_INIT: libc::Ioctl = _IOW::<kvm_vcpu_init>(KVMIO, 0xae);
 const KVM_GET_ONE_REG: libc::Ioctl = _IOW::<kvm_one_reg>(KVMIO, 0xab);
@@ -45,6 +45,15 @@ static REGS: LazyLock<HashMap<String, u64>> = LazyLock::new(|| {
 });
 
 impl VCPU {
+    pub fn set_breakpoints(&mut self, _breakpoints: Vec<Breakpoint>) -> io::Result<()> {
+        Err(io::Error::other("Breakpoints are x86 only so far."))
+    }
+
+    /* Never set up, see set_breakpoints. */
+    pub fn handle_debug_exit(&mut self) -> io::Result<()> {
+        Err(io::Error::other("Unexpected debug exit."))
+    }
+
 
     pub fn get_one_reg(&mut self, name: &str) -> io::Result<u64> {
         let mut val : u64 = 0;
