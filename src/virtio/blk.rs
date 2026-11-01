@@ -5,14 +5,15 @@ use std::fs::{ OpenOptions, File };
 use std::os::unix::fs::FileExt;
 
 const SECTOR_SIZE: u64 = 512;
-const QUEUE_SIZE: u32 = 128;
 
 pub struct VirtioBlk {
     disk: File,
     /* in sectors */
     capacity: u64,
     /* Data segments per request, offered with VIRTIO_BLK_F_SEG_MAX. */
-    seg_max: Option<u32>
+    seg_max: Option<u32>,
+    /* Entries in the request queue, offered as QueueNumMax. */
+    queue_size: u32
 }
 
 impl virtio_blk_outhdr {
@@ -23,7 +24,7 @@ impl virtio_blk_outhdr {
 }
 
 impl VirtioBlk {
-    pub fn new(disk: &str, seg_max: Option<u32>) -> io::Result<Self> {
+    pub fn new(disk: &str, seg_max: Option<u32>, queue_size: u32) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -31,7 +32,7 @@ impl VirtioBlk {
             .map_err(|e| io::Error::new(e.kind(), format!("Failed to open {}: {}", disk, e)))?;
         let capacity = file.metadata()?.len() / SECTOR_SIZE;
 
-        Ok(Self { disk: file, capacity, seg_max })
+        Ok(Self { disk: file, capacity, seg_max, queue_size })
     }
 
     /* Checks that `len` bytes from `sector` lie within the disk, returns the byte offset. */
@@ -74,7 +75,7 @@ impl VirtioDevice for VirtioBlk {
     }
 
     fn queue_num_max(&self, queue: u32) -> u32 {
-        if queue == 0 { QUEUE_SIZE } else { 0 }
+        if queue == 0 { self.queue_size } else { 0 }
     }
 
     fn read_config(&mut self, offset: u32, data: &mut [u8]) -> io::Result<()> {

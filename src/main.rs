@@ -178,10 +178,16 @@ pub struct Args {
 
     /// Offer VIRTIO_BLK_F_SEG_MAX with this many data segments per
     /// request. Without indirect descriptors a request takes seg_max + 2
-    /// ring entries, so above 126 (the ring is 128) the guest can build
+    /// ring entries, so above --blk-queue-size - 2 the guest can build
     /// requests that never fit [default: not offered, the guest uses 1]
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-    blk_seg_max: Option<u32>
+    blk_seg_max: Option<u32>,
+
+    /// Size of the virtio-blk request queue, offered as QueueNumMax.
+    /// Split rings must be a power of 2, and Linux refuses other sizes;
+    /// below 3 no request fits without indirect descriptors
+    #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(1..=32768))]
+    blk_queue_size: u32
 }
 
 /* GPA[:SIZE], GPA in hex with 0x or decimal, SIZE as for --memory. */
