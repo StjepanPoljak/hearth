@@ -174,7 +174,14 @@ pub struct Args {
     /// +OFFSET, or an address, e.g. start_kernel or 0xffffffff81000000.
     /// Repeat for more, at most 4 (x86 only, hardware breakpoints)
     #[arg(long = "break", value_name = "SYMBOL[+OFFSET]|ADDRESS")]
-    breakpoints: Vec<String>
+    breakpoints: Vec<String>,
+
+    /// Offer VIRTIO_BLK_F_SEG_MAX with this many data segments per
+    /// request. Without indirect descriptors a request takes seg_max + 2
+    /// ring entries, so above 126 (the ring is 128) the guest can build
+    /// requests that never fit [default: not offered, the guest uses 1]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    blk_seg_max: Option<u32>
 }
 
 /* GPA[:SIZE], GPA in hex with 0x or decimal, SIZE as for --memory. */
