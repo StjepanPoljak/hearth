@@ -139,10 +139,11 @@ enum Request {
     Update { incremental: bool }
 }
 
-pub fn start_rfb(addr: impl ToSocketAddrs, display: Option<Arc<dyn Display>>,
+pub fn start_rfb(addr: impl ToSocketAddrs + std::fmt::Display, display: Option<Arc<dyn Display>>,
                  keyboard: Option<Arc<Mutex<dyn Keyboard>>>) -> io::Result<()> {
     let display = display.unwrap_or_else(|| Arc::new(NoDisplay));
-    let listener = TcpListener::bind(addr)?;
+    let listener = TcpListener::bind(&addr)
+        .map_err(|e| io::Error::new(e.kind(), format!("--vnc {}: {}", addr, e)))?;
     println!("RFB server on {}\r", listener.local_addr()?);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
