@@ -127,8 +127,8 @@ pub struct Args {
     #[arg(long, alias = "kernel")]
     linux: Option<String>,
 
-    /// Memory size: a number with a K, M or G suffix; a plain number is
-    /// in kilobytes [default: 256K for --binary, 1G for --linux]
+    /// Memory size in bytes, or with a K, M or G suffix, e.g. 512M; a
+    /// multiple of the page size [default: 256K for --binary, 1G for --linux]
     #[arg(short, long, value_parser = parse_mem_size)]
     memory: Option<usize>,
 
@@ -229,24 +229,6 @@ fn parse_dirty_log(arg: &str) -> Result<(u64, usize), String> {
     };
     let gpa = parse_number(gpa).map_err(|e| format!("invalid GPA: {}", e))?;
     Ok((gpa, size))
-}
-
-/* Returns the size in bytes. */
-fn parse_mem_size(arg: &str) -> Result<usize, String> {
-    let (num, unit) = match arg.char_indices().last() {
-        Some((i, c)) if c.is_ascii_alphabetic() => (&arg[..i], c.to_ascii_uppercase()),
-        _ => (arg, 'K')
-    };
-    let shift = match unit {
-        'K' => 10,
-        'M' => 20,
-        'G' => 30,
-        _ => return Err(format!("unknown size suffix '{}'", unit))
-    };
-    let num: usize = num.parse().map_err(|e| format!("{}", e))?;
-    num.checked_mul(1 << shift)
-        .filter(|size| *size > 0)
-        .ok_or(format!("invalid memory size {}", arg))
 }
 
 pub struct KvmDev {

@@ -8,7 +8,7 @@ use std::fs;
 use std::io;
 use serde::{ Deserialize, Deserializer };
 use serde::de::Error;
-use crate::{ parse_number, parse_mem_size, parse_serial, SerialSpec };
+use crate::{ parse_number, parse_serial, SerialSpec };
 
 pub const DEFAULT_LOAD_ADDR: u64 = 0x1000;
 pub const DEFAULT_BLK_QUEUE_SIZE: u32 = 128;
@@ -21,7 +21,7 @@ pub struct VmConfig {
     pub binary: Option<String>,
     #[serde(alias = "kernel")]
     pub linux: Option<String>,
-    /* In bytes; written as for --memory, e.g. "1G". */
+    /* In bytes; written as for --memory, e.g. "1G", or as a number of bytes. */
     #[serde(deserialize_with = "de_mem_size")]
     pub memory: Option<usize>,
     pub load_addr: u64,
@@ -76,13 +76,55 @@ impl VmConfig {
         if self.binary.is_some() && self.linux.is_some() {
             return Err("give either binary or linux, not both".into());
         }
+        if let Some(memory) = self.memory {
+            /* KVM maps guest memory in whole host pages. */
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+            if memory % page_size != 0 {
+                return Err(format!("memory must be a multiple of the page size ({}), got {}",
+                                   page_size, memory));
+            }
+        }
         Ok(())
     }
 }
 
+/* A size in bytes, with an optional K, M or G suffix. */
+pub fn parse_mem_size(arg: &str) -> Result<usize, String> {
+    let (num, shift) = match arg.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&arg[..i], match c.to_ascii_uppercase() {
+            'K' => 10,
+            'M' => 20,
+            'G' => 30,
+            _ => return Err(format!("unknown size suffix '{}'", c))
+        }),
+        _ => (arg, 0)
+    };
+    let num: usize = num.parse().map_err(|e| format!("invalid size {}: {}", arg, e))?;
+    num.checked_mul(1 << shift)
+        .filter(|size| *size > 0)
+        .ok_or(format!("invalid size {}", arg))
+}
+
+/* memory = "512M", or memory = 536870912 in bytes, as on the command line. */
 fn de_mem_size<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    let size = String::deserialize(d)?;
-    parse_mem_size(&size).map(Some).map_err(D::Error::custom)
+    struct SizeVisitor;
+    impl<'de> serde::de::Visitor<'de> for SizeVisitor {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a size in bytes, or a string with a K, M or G suffix, e.g. \"512M\"")
+        }
+        fn visit_u64<E: Error>(self, n: u64) -> Result<usize, E> {
+            usize::try_from(n).ok().filter(|n| *n > 0).ok_or(E::custom(format!("invalid size {}", n)))
+        }
+        fn visit_i64<E: Error>(self, n: i64) -> Result<usize, E> {
+            u64::try_from(n).map_err(|_| E::custom(format!("invalid size {}", n)))
+                .and_then(|n| self.visit_u64(n))
+        }
+        fn visit_str<E: Error>(self, s: &str) -> Result<usize, E> {
+            parse_mem_size(s).map_err(E::custom)
+        }
+    }
+    d.deserialize_any(SizeVisitor).map(Some)
 }
 
 fn de_serial<'de, D: Deserializer<'de>>(d: D) -> Result<SerialSpec, D::Error> {
