@@ -132,3 +132,97 @@ impl VringQueue {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use crate::{ MemRegion, mmap_mem_region };
+
+    const MEM_SIZE: usize = 0x10000;
+    const DESC: u64 = 0x0;
+    const AVAIL: u64 = 0x1000;
+    const USED: u64 = 0x2000;
+    const NUM: u32 = 4;
+
+    fn guest_memory() -> GuestMemory {
+        let mem_ptr = mmap_mem_region(MEM_SIZE).unwrap();
+        vec![Arc::new(MemRegion { mem_ptr, mem_size: MEM_SIZE, guest_phys_addr: 0, allocators: vec![] })]
+    }
+
+    fn queue() -> VringQueue {
+        VringQueue { ready: 1, num: NUM, last_avail_idx: 0, desc: DESC, avail: AVAIL, used: USED }
+    }
+
+    fn write<T>(mem: &GuestMemory, gpa: u64, val: T) {
+        write_guest_ptr(gpa_to_host(mem, gpa, std::mem::size_of::<T>()).unwrap(), val);
+    }
+
+    fn set_desc(mem: &GuestMemory, idx: u16, addr: u64, len: u32, flags: u32, next: u16) {
+        let gpa = DESC + idx as u64 * std::mem::size_of::<vring_desc>() as u64;
+        write(mem, gpa, vring_desc { addr, len, flags: flags as u16, next });
+    }
+
+    /* Makes the chain starting at head available as the first entry. */
+    fn offer(mem: &GuestMemory, head: u16) {
+        write::<u16>(mem, AVAIL + 4, head);
+        write::<u16>(mem, AVAIL + 2, 1);
+    }
+
+    #[test]
+    fn empty_ring() {
+        let mem = guest_memory();
+        assert!(queue().pop_avail(&mem).unwrap().is_none());
+    }
+
+    #[test]
+    fn valid_chain() {
+        let mem = guest_memory();
+        write::<[u8; 3]>(&mem, 0x4000, *b"abc");
+        set_desc(&mem, 0, 0x4000, 3, VRING_DESC_F_NEXT, 1);
+        set_desc(&mem, 1, 0x5000, 16, VRING_DESC_F_WRITE, 0);
+        offer(&mem, 0);
+        let chain = queue().pop_avail(&mem).unwrap().unwrap();
+        assert_eq!(chain.head, 0);
+        assert_eq!(chain.read_buf, b"abc");
+        assert_eq!(chain.write_buf.len(), 1);
+        assert_eq!(chain.write_buf[0].len(), 16);
+    }
+
+    /* Each of these used to panic the vcpu thread, or index past the ring. */
+    #[test]
+    fn bad_chains_are_errors() {
+        let cases: [(&str, fn(&GuestMemory)); 5] = [
+            ("head outside the ring", |mem| offer(mem, NUM as u16)),
+            ("next outside the ring", |mem| {
+                set_desc(mem, 0, 0x4000, 4, VRING_DESC_F_NEXT, 7);
+                offer(mem, 0);
+            }),
+            ("readable buffer outside memory", |mem| {
+                set_desc(mem, 0, MEM_SIZE as u64, 4, 0, 0);
+                offer(mem, 0);
+            }),
+            ("readable buffer running off the end", |mem| {
+                set_desc(mem, 0, MEM_SIZE as u64 - 2, 4, 0, 0);
+                offer(mem, 0);
+            }),
+            ("writable buffer outside memory", |mem| {
+                set_desc(mem, 0, u64::MAX - 1, 4, VRING_DESC_F_WRITE, 0);
+                offer(mem, 0);
+            }),
+        ];
+        for (name, setup) in cases {
+            let mem = guest_memory();
+            setup(&mem);
+            assert!(queue().pop_avail(&mem).is_err(), "{}: accepted", name);
+        }
+    }
+
+    #[test]
+    fn desc_table_outside_memory() {
+        let mem = guest_memory();
+        offer(&mem, 0);
+        let q = VringQueue { desc: MEM_SIZE as u64, ..queue() };
+        assert!(q.clone().pop_avail(&mem).is_err());
+    }
+}
