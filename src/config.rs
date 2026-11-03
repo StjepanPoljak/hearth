@@ -231,9 +231,84 @@ mod tests {
     fn errors() {
         for bad in ["", "queue_size=4", "path=", "a.img,", "a.img,b.img", "a.img,path=b.img",
                     "a.img,queue_size=0", "a.img,queue_size=32769", "a.img,seg_max=0",
-                    "a.img,seg_max=x",
+                    "a.img,seg_max=x", "a.img,seg_max=0x100000000",
                     "a.img,seg_max=1,seg_max=2", "a.img,ro=on"] {
             assert!(parse_disk(bad).is_err(), "accepted {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn toml_full() {
+        let config = VmConfig::from_toml(r#"
+            name = "web1"
+            kernel = "vmlinux"
+            memory = "512M"
+            append = "root=/dev/vda"
+            serial = "unix:/tmp/web1.sock"
+            tap = "tap0"
+
+            [disk]
+            path = "rootfs.img"
+            queue_size = 256
+            seg_max = 126
+        "#).unwrap();
+        assert_eq!(config.name.as_deref(), Some("web1"));
+        assert_eq!(config.linux.as_deref(), Some("vmlinux"));
+        assert_eq!(config.memory, Some(512 << 20));
+        assert_eq!(config.load_addr, DEFAULT_LOAD_ADDR);
+        assert!(matches!(config.serial, SerialSpec::Unix(ref p) if p == "/tmp/web1.sock"));
+        assert_eq!(config.disk, Some(disk("rootfs.img", 256, Some(126))));
+    }
+
+    #[test]
+    fn toml_defaults() {
+        let config = VmConfig::from_toml("[disk]\npath = \"a.img\"\n").unwrap();
+        assert!(matches!(config.serial, SerialSpec::Stdio));
+        assert_eq!(config.disk, Some(disk("a.img", DEFAULT_BLK_QUEUE_SIZE, None)));
+    }
+
+    #[test]
+    fn mem_sizes() {
+        assert_eq!(parse_mem_size("1"), Ok(1));
+        assert_eq!(parse_mem_size("4096"), Ok(4096));
+        assert_eq!(parse_mem_size("1K"), Ok(1 << 10));
+        assert_eq!(parse_mem_size("256k"), Ok(256 << 10));
+        assert_eq!(parse_mem_size("512M"), Ok(512 << 20));
+        assert_eq!(parse_mem_size("2G"), Ok(2 << 30));
+        for bad in ["", "0", "0K", "K", "1T", "1.5G", "-1", "1 G", "99999999999999999999G"] {
+            assert!(parse_mem_size(bad).is_err(), "accepted {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn toml_memory_in_bytes() {
+        let config = VmConfig::from_toml("memory = 536870912").unwrap();
+        assert_eq!(config.memory, Some(512 << 20));
+    }
+
+    #[test]
+    fn validate() {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let linux = |memory| VmConfig { linux: Some("vmlinux".into()), memory, ..VmConfig::default() };
+        assert!(linux(None).validate().is_ok());
+        assert!(linux(Some(page_size * 3)).validate().is_ok());
+        assert!(linux(Some(1)).validate().is_err());
+        assert!(linux(Some(page_size + 1)).validate().is_err());
+        assert!(VmConfig::default().validate().is_err());
+        let both = VmConfig { binary: Some("a.bin".into()), ..linux(None) };
+        assert!(both.validate().is_err());
+    }
+
+    #[test]
+    fn toml_errors() {
+        for bad in ["memroy = \"1G\"", "memory = 0", "memory = -4096", "memory = 1.5",
+                    "memory = \"1T\"", "memory = \"1.5G\"", "serial = \"tty\"",
+                    "load_addr = -1", "[disk]\nqueue_size = 4",
+                    "[disk]\npath = \"a.img\"\nqueue_size = 0",
+                    "[disk]\npath = \"a.img\"\nqueue_size = 32769",
+                    "[disk]\npath = \"a.img\"\nseg_max = 0",
+                    "[disk]\npath = \"a.img\"\nro = true"] {
+            assert!(VmConfig::from_toml(bad).is_err(), "accepted {:?}", bad);
         }
     }
 }
