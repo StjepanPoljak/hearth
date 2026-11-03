@@ -5,10 +5,13 @@ use super::arch_update_irq;
 use std::collections::HashMap;
 use std::sync::{ Arc, Mutex, LazyLock };
 
+/* QEMU's virt machine layout, so its device trees describe these: the
+ * PL011 on SPI 1, and the first virtio-mmio slot at 0xa000000 on SPI 16
+ * (the slots that follow, 0x200 apart, take SPIs 17 and up). */
 const UART_MMIO_ADDR: u64 = 0x900_0000;
-const UART_IRQ: u32 = 0x1;
+const UART_IRQ: u32 = 1;
 const VIRTIO_BLK_MMIO_ADDR: u64 = 0xa00_0000;
-const VIRTIO_BLK_IRQ: u32 = 0x2;
+const VIRTIO_BLK_IRQ: u32 = 16;
 
 pub struct UART {
     rx: Option<u8>,
