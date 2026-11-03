@@ -1,4 +1,5 @@
-use std::io;
+use anyhow::{ bail, Result };
+use crate::syscall_check;
 use libc::{ _IOW, _IOR };
 
 use crate::{kvm_regs, kvm_sregs2, kvm_dtable, kvm_segment, kvm_run, kvm_guest_debug, kvm_debugregs};
@@ -77,61 +78,49 @@ impl kvm_sregs2 {
 
 impl VCPU {
 
-    pub fn get_sregs2(&mut self) -> io::Result<kvm_sregs2> {
+    pub fn get_sregs2(&mut self) -> Result<kvm_sregs2> {
         let mut sregs2 = unsafe { std::mem::zeroed() };
         // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8140aecc /* KVM_GET_SREGS2 */, 0x77690198f310) = 0
-        let ret = unsafe {
+        syscall_check("KVM_GET_SREGS2", unsafe {
             libc::ioctl(self.fd, KVM_GET_SREGS2, &mut sregs2)
-        };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        })?;
 
         Ok(sregs2)
     }
 
-    pub fn set_sregs2(&self, sregs2: kvm_sregs2) -> io::Result<()> {
-        let ret = unsafe {
+    pub fn set_sregs2(&self, sregs2: kvm_sregs2) -> Result<()> {
+        syscall_check("KVM_SET_SREGS2", unsafe {
             libc::ioctl(self.fd, KVM_SET_SREGS2, &sregs2)
-        };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        })?;
 
         Ok(())
     }
 
-    pub fn get_regs(&mut self) -> io::Result<kvm_regs> {
+    pub fn get_regs(&mut self) -> Result<kvm_regs> {
         let mut regs = unsafe { std::mem::zeroed() };
         // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8090ae81 /* KVM_GET_REGS */, {rax=0, ..., rsp=0, rbp=0, ..., rip=0xfff0, rflags=0x2}) = 0
-        let ret = unsafe {
+        syscall_check("KVM_GET_REGS", unsafe {
             libc::ioctl(self.fd, KVM_GET_REGS, &mut regs)
-        };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        })?;
 
         Ok(regs)
     }
 
-    pub fn set_regs(&self, regs: kvm_regs) -> io::Result<()> {
-        let ret = unsafe {
+    pub fn set_regs(&self, regs: kvm_regs) -> Result<()> {
+        syscall_check("KVM_SET_REGS", unsafe {
             libc::ioctl(self.fd, KVM_SET_REGS, &regs)
-        };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        })?;
 
         Ok(())
     }
 
-    pub fn set_ip(&mut self, ip: usize) -> io::Result<()> {
+    pub fn set_ip(&mut self, ip: usize) -> Result<()> {
         let mut regs = self.get_regs()?;
         regs.rip = ip as u64;
         self.set_regs(regs)
     }
 
-    pub fn get_ip(&mut self) -> io::Result<usize> {
+    pub fn get_ip(&mut self) -> Result<usize> {
         let rip = self.get_regs()?.rip;
         Ok(rip as usize)
     }
@@ -139,15 +128,15 @@ impl VCPU {
     /* Makes the vcpu exit with KVM_EXIT_DEBUG before executing any of
      * the breakpoints' addresses, using the debug registers. KVM keeps
      * the guest's own debug registers aside meanwhile. */
-    pub fn set_breakpoints(&mut self, breakpoints: Vec<Breakpoint>) -> io::Result<()> {
+    pub fn set_breakpoints(&mut self, breakpoints: Vec<Breakpoint>) -> Result<()> {
         if breakpoints.len() > MAX_BREAKPOINTS {
-            return Err(io::Error::other(format!("At most {} breakpoints, {} given.", MAX_BREAKPOINTS, breakpoints.len())));
+            bail!("At most {} breakpoints, {} given.", MAX_BREAKPOINTS, breakpoints.len());
         }
         self.breakpoints = breakpoints;
         self.set_guest_debug(0)
     }
 
-    fn set_guest_debug(&self, extra_control: u32) -> io::Result<()> {
+    fn set_guest_debug(&self, extra_control: u32) -> Result<()> {
         let mut dbg: kvm_guest_debug = unsafe { std::mem::zeroed() };
         dbg.control = KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP | extra_control;
         /* DR7: bit 10 is reserved as 1, bit 9 (GE) is what QEMU sets too. */
@@ -158,17 +147,14 @@ impl VCPU {
             dr7 |= 2 << (2 * i);
         }
         dbg.arch.debugreg[7] = dr7;
-        let ret = unsafe { libc::ioctl(self.fd, KVM_SET_GUEST_DEBUG, &dbg) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        syscall_check("KVM_SET_GUEST_DEBUG", unsafe { libc::ioctl(self.fd, KVM_SET_GUEST_DEBUG, &dbg) })?;
         Ok(())
     }
 
     /* With breakpoints set, KVM hands every #DB to us, the guest's own
      * too (a single step it asked for, say). Reports ours and resumes;
      * gives the others back to the guest. */
-    pub fn handle_debug_exit(&mut self) -> io::Result<()> {
+    pub fn handle_debug_exit(&mut self) -> Result<()> {
         let debug = unsafe { (*(self.kvm_run_mem as *mut kvm_run)).__bindgen_anon_1.debug.arch };
         /* B0..B3 of DR6 tell which debug register matched. */
         let hit = (0..self.breakpoints.len())
@@ -190,19 +176,15 @@ impl VCPU {
 
     /* The guest reads DR6 in its #DB handler, so it gets the one the
      * exception came with. */
-    fn reinject_debug_exception(&self, dr6: u64) -> io::Result<()> {
+    fn reinject_debug_exception(&self, dr6: u64) -> Result<()> {
         let mut debugregs: kvm_debugregs = unsafe { std::mem::zeroed() };
-        if unsafe { libc::ioctl(self.fd, KVM_GET_DEBUGREGS, &mut debugregs) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        syscall_check("KVM_GET_DEBUGREGS", unsafe { libc::ioctl(self.fd, KVM_GET_DEBUGREGS, &mut debugregs) })?;
         debugregs.dr6 = dr6;
-        if unsafe { libc::ioctl(self.fd, KVM_SET_DEBUGREGS, &debugregs) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        syscall_check("KVM_SET_DEBUGREGS", unsafe { libc::ioctl(self.fd, KVM_SET_DEBUGREGS, &debugregs) })?;
         self.set_guest_debug(KVM_GUESTDBG_INJECT_DB)
     }
 
-    pub fn print_regs(&mut self) -> io::Result<()> {
+    pub fn print_regs(&mut self) -> Result<()> {
         let regs = self.get_regs()?;
         let sregs2 = self.get_sregs2()?;
 
@@ -212,7 +194,7 @@ impl VCPU {
         Ok(())
     }
 
-    pub fn protected_mode_setup(&mut self) -> io::Result<()> {
+    pub fn protected_mode_setup(&mut self) -> Result<()> {
         let mut sregs2 = self.get_sregs2()?;
         let code = kvm_segment {
             base: 0,

@@ -1,3 +1,4 @@
+use anyhow::Result;
 use crate::{ GuestError, GuestMemory, gpa_to_host, read_guest_ptr, write_guest_ptr };
 use crate::virtio_bindings::*;
 use std::sync::atomic::{ Ordering, fence };

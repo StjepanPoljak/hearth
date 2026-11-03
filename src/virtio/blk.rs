@@ -1,3 +1,4 @@
+use anyhow::{ Context, Result };
 use std::io::{ self };
 use crate::{ VirtioDevice, DescChain, DiskConfig, GuestError, write_le32, new_from };
 use crate::virtio_bindings::*;
@@ -24,13 +25,13 @@ impl virtio_blk_outhdr {
 }
 
 impl VirtioBlk {
-    pub fn new(config: &DiskConfig) -> io::Result<Self> {
+    pub fn new(config: &DiskConfig) -> Result<Self> {
         let DiskConfig { path, queue_size, seg_max } = config;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(path)
-            .map_err(|e| io::Error::new(e.kind(), format!("Failed to open {}: {}", path, e)))?;
+            .with_context(|| format!("Failed to open {}", path))?;
         let capacity = file.metadata()?.len() / SECTOR_SIZE;
 
         Ok(Self { disk: file, capacity, seg_max: *seg_max, queue_size: *queue_size })
@@ -83,7 +84,7 @@ impl VirtioDevice for VirtioBlk {
         if queue == 0 { self.queue_size } else { 0 }
     }
 
-    fn read_config(&mut self, offset: u32, data: &mut [u8]) -> io::Result<()> {
+    fn read_config(&mut self, offset: u32, data: &mut [u8]) -> Result<()> {
         match offset {
             /* capacity is measured in 512 bytes */
             0x0 => write_le32(data, 0, self.capacity as u32), /* capacity low */

@@ -27,7 +27,7 @@ pub use blk::*;
 pub use net::*;
 
 impl VM {
-    pub fn init_virtio_blk(&mut self, config: &VmConfig, addr: u64, irq: u32) -> io::Result<()> {
+    pub fn init_virtio_blk(&mut self, config: &VmConfig, addr: u64, irq: u32) -> Result<()> {
         if let Some(disk) = &config.disk {
             let virtio_blk = VirtioMmio::new(VirtioBlk::new(disk)?, self.fd, irq);
             self.add_mmio_device(addr, virtio_blk);
@@ -35,7 +35,7 @@ impl VM {
         Ok(())
     }
 
-    pub fn init_virtio_net(&mut self, config: &VmConfig, addr: u64, irq: u32) -> io::Result<()> {
+    pub fn init_virtio_net(&mut self, config: &VmConfig, addr: u64, irq: u32) -> Result<()> {
         if let Some(tap) = &config.tap {
             let virtio_net = VirtioMmio::new(VirtioNet::new(tap, self.control.clone())?, self.fd, irq);
             self.add_mmio_device(addr, virtio_net);

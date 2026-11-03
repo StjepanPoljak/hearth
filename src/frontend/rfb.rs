@@ -12,6 +12,7 @@
  * Updates use the Raw encoding and cover the rows that changed.
  */
 
+use anyhow::Context;
 use std::io::{ self, Read, Write };
 use std::net::{ TcpListener, TcpStream, ToSocketAddrs };
 use std::ops::Range;
@@ -49,7 +50,7 @@ pub trait Display: Send + Sync {
 /* What a VNC client types into, e.g. a PS/2 keyboard. */
 pub trait Keyboard: Send {
     /* An X11 keysym went down or up. */
-    fn key_event(&mut self, down: bool, keysym: u32) -> io::Result<()>;
+    fn key_event(&mut self, down: bool, keysym: u32) -> anyhow::Result<()>;
 }
 
 struct NoDisplay;
@@ -140,10 +141,9 @@ enum Request {
 }
 
 pub fn start_rfb(addr: impl ToSocketAddrs + std::fmt::Display, display: Option<Arc<dyn Display>>,
-                 keyboard: Option<Arc<Mutex<dyn Keyboard>>>) -> io::Result<()> {
+                 keyboard: Option<Arc<Mutex<dyn Keyboard>>>) -> anyhow::Result<()> {
     let display = display.unwrap_or_else(|| Arc::new(NoDisplay));
-    let listener = TcpListener::bind(&addr)
-        .map_err(|e| io::Error::new(e.kind(), format!("--vnc {}: {}", addr, e)))?;
+    let listener = TcpListener::bind(&addr).with_context(|| format!("--vnc {}", addr))?;
     println!("RFB server on {}\r", listener.local_addr()?);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -258,7 +258,9 @@ fn read_messages(stream: &mut TcpStream, keyboard: Option<&Mutex<dyn Keyboard>>,
                 let mut b = [0u8; 7];
                 stream.read_exact(&mut b)?;
                 if let Some(keyboard) = keyboard {
-                    keyboard.lock().unwrap().key_event(b[0] != 0, u32::from_be_bytes([b[3], b[4], b[5], b[6]]))?;
+                    /* Only the IRQ ioctl fails here; the client's thread ends. */
+                    keyboard.lock().unwrap().key_event(b[0] != 0, u32::from_be_bytes([b[3], b[4], b[5], b[6]]))
+                        .map_err(io::Error::other)?;
                 }
                 None
             },
@@ -375,7 +377,7 @@ mod tests {
     struct Keys(Vec<(bool, u32)>);
 
     impl Keyboard for Keys {
-        fn key_event(&mut self, down: bool, keysym: u32) -> io::Result<()> {
+        fn key_event(&mut self, down: bool, keysym: u32) -> anyhow::Result<()> {
             self.0.push((down, keysym));
             Ok(())
         }

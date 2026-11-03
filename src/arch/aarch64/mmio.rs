@@ -1,4 +1,4 @@
-use std::io::{ self };
+use anyhow::Result;
 use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, VmControl, VmConfig, SerialSpec, SerialOut };
 use crate::{ write_le32, read_le32, start_serial };
 use super::arch_update_irq;
@@ -26,7 +26,7 @@ pub struct UART {
 }
 
 impl TTY for UART {
-    fn send_char(&mut self, ch: u8) -> io::Result<()> {
+    fn send_char(&mut self, ch: u8) -> Result<()> {
         self.rx = Some(ch);
         self.ris |= 1 << 4;
         self.update_irq()
@@ -35,7 +35,7 @@ impl TTY for UART {
 
 impl MMIODevice for UART {
 
-    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> io::Result<()> {
+    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> Result<()> {
         let mmio_reg = mmio.phys_addr & 0xfff;
         if (mmio.is_write != 0) && mmio_reg == 0x0 {
             /* we take only first u8 element of data */
@@ -73,7 +73,7 @@ static PL011_ID_MAP: LazyLock<HashMap<u32, u32>> = LazyLock::new(|| {
 });
 
 impl UART {
-    fn new(vm_fd: libc::c_int, control: Arc<VmControl>, serial: &SerialSpec) -> io::Result<Arc<Mutex<Self>>> {
+    fn new(vm_fd: libc::c_int, control: Arc<VmControl>, serial: &SerialSpec) -> Result<Arc<Mutex<Self>>> {
         let uart = Arc::new(Mutex::new(UART {
             fr: 0x90, cr: 0x0, imsc: 0x0, lcr: 0x0, ibrd: 0x0, fbrd: 0x0, icr: 0x0, ris: 0x0, rx: None, vm_fd,
             out: SerialOut::default()
@@ -84,7 +84,7 @@ impl UART {
         Ok(uart)
     }
 
-    fn pl011_response(&mut self, inb: u32) -> io::Result<u32> {
+    fn pl011_response(&mut self, inb: u32) -> Result<u32> {
         if let Some(ret) = PL011_ID_MAP.get(&inb) {
             return Ok(*ret);
         }
@@ -108,13 +108,13 @@ impl UART {
         }
     }
 
-    pub fn update_irq(&mut self) -> io::Result<()> {
+    pub fn update_irq(&mut self) -> Result<()> {
         arch_update_irq(((self.ris & self.imsc) != 0) as u32, self.vm_fd, UART_IRQ)
     }
 }
 
 impl VM {
-    pub fn arch_init_mmio_devices(&mut self, config: &VmConfig) -> io::Result<()> {
+    pub fn arch_init_mmio_devices(&mut self, config: &VmConfig) -> Result<()> {
         let uart = UART::new(self.fd, self.control.clone(), &config.serial)?;
         self.add_mmio_device(UART_MMIO_ADDR, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
         self.init_virtio_blk(config, VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ)

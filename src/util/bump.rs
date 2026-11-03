@@ -1,4 +1,4 @@
-use std::io;
+use anyhow::{ anyhow, Result };
 
 /* Hands out guest memory in gpa_start..gpa_end, front to back, for what
  * the VMM puts in the guest before it runs: boot info, command lines,
@@ -30,7 +30,7 @@ impl BumpAllocator {
     }
 
     /* Copies bytes in at the next free GPA and returns that GPA. */
-    pub fn push(&mut self, bytes: &[u8]) -> io::Result<u64> {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<u64> {
         let gpa = self.next;
         let ptr = self.reserve(bytes.len())?;
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
@@ -40,22 +40,22 @@ impl BumpAllocator {
     /* Takes the next size bytes and returns where they are mapped in the
      * VMM, for the caller to fill in; their GPA is next() before the
      * call. */
-    pub fn reserve(&mut self, size: usize) -> io::Result<*mut u8> {
+    pub fn reserve(&mut self, size: usize) -> Result<*mut u8> {
         let end = self.next.checked_add(size as u64)
             .filter(|&end| end <= self.gpa_end)
-            .ok_or_else(|| io::Error::other(format!(
-                "{:#x} bytes at {:#x} cross the allocator's end, {:#x}.", size, self.next, self.gpa_end)))?;
+            .ok_or_else(|| anyhow!(
+                "{:#x} bytes at {:#x} cross the allocator's end, {:#x}.", size, self.next, self.gpa_end))?;
         let ptr = unsafe { self.host_start.add((self.next - self.gpa_start) as usize) };
         self.next = end;
         Ok(ptr)
     }
 
     /* Moves next up to a multiple of align, a power of two. */
-    pub fn align(&mut self, align: u64) -> io::Result<u64> {
+    pub fn align(&mut self, align: u64) -> Result<u64> {
         let aligned = self.next.checked_next_multiple_of(align)
             .filter(|&a| a <= self.gpa_end)
-            .ok_or_else(|| io::Error::other(format!(
-                "Aligning {:#x} to {:#x} crosses the allocator's end, {:#x}.", self.next, align, self.gpa_end)))?;
+            .ok_or_else(|| anyhow!(
+                "Aligning {:#x} to {:#x} crosses the allocator's end, {:#x}.", self.next, align, self.gpa_end))?;
         self.next = aligned;
         Ok(aligned)
     }

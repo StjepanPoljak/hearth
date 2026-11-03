@@ -4,8 +4,8 @@
  * keys of its [disk] table. Relative paths are taken from the current
  * directory, as on the command line, not from the file's. */
 
+use anyhow::{ anyhow, Context, Result };
 use std::fs;
-use std::io;
 use serde::{ Deserialize, Deserializer };
 use serde::de::Error;
 use crate::{ parse_number, parse_serial, SerialSpec };
@@ -56,11 +56,9 @@ impl Default for VmConfig {
 }
 
 impl VmConfig {
-    pub fn load(path: &str) -> io::Result<Self> {
-        let text = fs::read_to_string(path)
-            .map_err(|e| io::Error::new(e.kind(), format!("Failed to read {}: {}", path, e)))?;
-        Self::from_toml(&text)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {}", path, e)))
+    pub fn load(path: &str) -> Result<Self> {
+        let text = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
+        Self::from_toml(&text).map_err(|e| anyhow!("{}: {}", path, e))
     }
 
     fn from_toml(text: &str) -> Result<Self, String> {

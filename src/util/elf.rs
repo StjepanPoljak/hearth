@@ -1,10 +1,10 @@
+use anyhow::Result;
 use object::elf;
 use object::read::elf::{ElfFile64, ProgramHeader};
 use crate::VM;
 use object::{Endianness};
-use std::io;
 
-pub fn load_elf(vm: &mut VM, elf: &ElfFile64<Endianness>, elf_data: &[u8], mem_idx: usize) -> io::Result<u64> {
+pub fn load_elf(vm: &mut VM, elf: &ElfFile64<Endianness>, elf_data: &[u8], mem_idx: usize) -> Result<u64> {
     let endian = elf.endian();
     let mut last_addr = 0u64;
     for ph in elf.elf_program_headers() {

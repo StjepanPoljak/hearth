@@ -1,3 +1,5 @@
+use anyhow::{ anyhow, Context, Result };
+use crate::syscall_check;
 use crate::{ kvm_cpuid2, kvm_cpuid_entry2, kvm_pit_config };
 use crate::{ VCPU, VM, KvmDev, VmConfig, KVMIO, PAGE_SIZE };
 use crate::{ read_le64, read_le32, load_elf, read_file };
@@ -5,7 +7,6 @@ use libc::{_IOW, _IO, _IOWR};
 
 use object::read::elf::{ElfFile64, SectionHeader};
 use object::{Endianness, Object};
-use std::io;
 use super::mmio::{ VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ, VIRTIO_NET_MMIO_ADDR, VIRTIO_NET_IRQ };
 
 const KVM_SET_TSS_ADDR: libc::Ioctl = _IO(KVMIO, 0x47);
@@ -52,23 +53,14 @@ const TSS_ADDR: u64 = 0xfffb_d000;
 /* Where the PVH start info goes, followed by what it points at. */
 const HVM_START_INFO_ADDR: u64 = 0x10000;
 
-pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
-    let ret = unsafe { libc::ioctl(vm.fd, KVM_SET_TSS_ADDR, TSS_ADDR) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, vm: &mut VM) -> Result<()> {
+    syscall_check("KVM_SET_TSS_ADDR", unsafe { libc::ioctl(vm.fd, KVM_SET_TSS_ADDR, TSS_ADDR) })?;
 
-    let ret = unsafe { libc::ioctl(vm.fd, KVM_CREATE_IRQCHIP, 0x0) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    syscall_check("KVM_CREATE_IRQCHIP", unsafe { libc::ioctl(vm.fd, KVM_CREATE_IRQCHIP, 0x0) })?;
 
     let pit_config = kvm_pit_config { flags: 0, pad: [0; 15] };
 
-    let ret = unsafe { libc::ioctl(vm.fd, KVM_CREATE_PIT2, &pit_config) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    syscall_check("KVM_CREATE_PIT2", unsafe { libc::ioctl(vm.fd, KVM_CREATE_PIT2, &pit_config) })?;
 
     Ok(())
 }
@@ -84,20 +76,14 @@ unsafe fn print_cpuid(cpuid2: *const kvm_cpuid2) {
     }
 }
 
-pub fn arch_init(kvm_dev: &KvmDev, _vm: &mut VM, vcpu: &mut VCPU) -> io::Result<()> {
+pub fn arch_init(kvm_dev: &KvmDev, _vm: &mut VM, vcpu: &mut VCPU) -> Result<()> {
     let mut cpuid2_buf = vec![0u32; size_of::<kvm_cpuid2>() + 256 * size_of::<kvm_cpuid_entry2>()];
     let cpuid2 = cpuid2_buf.as_mut_ptr() as *mut kvm_cpuid2;
     unsafe { (*cpuid2).nent = 256; }
 
-    let ret = unsafe { libc::ioctl(kvm_dev.fd(), KVM_GET_SUPPORTED_CPUID, cpuid2) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    syscall_check("KVM_GET_SUPPORTED_CPUID", unsafe { libc::ioctl(kvm_dev.fd(), KVM_GET_SUPPORTED_CPUID, cpuid2) })?;
 
-    let ret = unsafe { libc::ioctl(vcpu.fd, KVM_SET_CPUID2, cpuid2) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    syscall_check("KVM_SET_CPUID2", unsafe { libc::ioctl(vcpu.fd, KVM_SET_CPUID2, cpuid2) })?;
 
     let mut sregs2 = vcpu.get_sregs2()?;
 
@@ -108,9 +94,9 @@ pub fn arch_init(kvm_dev: &KvmDev, _vm: &mut VM, vcpu: &mut VCPU) -> io::Result<
 }
 
 impl VM {
-    fn try_pvh_entrypoint(&mut self, vmlinux: &ElfFile64<Endianness>) -> io::Result<u64> {
+    fn try_pvh_entrypoint(&mut self, vmlinux: &ElfFile64<Endianness>) -> Result<u64> {
         let endian = vmlinux.endian();
-        let mut notes = vmlinux.section_by_name(".notes").ok_or(io::Error::other("No .notes found."))?
+        let mut notes = vmlinux.section_by_name(".notes").ok_or(anyhow!("No .notes found."))?
             .elf_section_header()
             .notes(endian, vmlinux.data()).unwrap()
             .unwrap();
@@ -120,19 +106,19 @@ impl VM {
                 return match note.desc().len() {
                     4 => Ok(read_le32(note.desc(), 0) as u64),
                     8 => Ok(read_le64(note.desc(), 0)),
-                    _ => Err(io::Error::other(format!("unexpected PHYS32_ENTRY descsz {}", note.desc().len())))
+                    _ => Err(anyhow!("unexpected PHYS32_ENTRY descsz {}", note.desc().len()))
                 };
             }
         }
 
-        Err(io::Error::other(format!("No valid PVH entry found.")))
+        Err(anyhow!("No valid PVH entry found."))
     }
 
-    fn linux_pvh_boot(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
+    fn linux_pvh_boot(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> Result<()> {
         let vmlinux_path = config.linux.as_ref().unwrap();
         let vmlinux_data = read_file(vmlinux_path)?;
         let vmlinux = ElfFile64::<Endianness>::parse(&*vmlinux_data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{} is not an ELF file: {}", vmlinux_path, e)))?;
+            .with_context(|| format!("{} is not an ELF file", vmlinux_path))?;
 
         let pvh_entrypoint = self.try_pvh_entrypoint(&vmlinux)?;
 
@@ -241,7 +227,7 @@ impl VM {
         Ok(())
     }
 
-    pub fn arch_load_linux(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
+    pub fn arch_load_linux(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> Result<()> {
         self.linux_pvh_boot(vcpu, config)
     }
 }

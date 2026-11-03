@@ -1,3 +1,5 @@
+use anyhow::{ bail, Context, Result };
+use crate::syscall_check;
 use std::io::{ self };
 use crate::{ VirtioDevice, DescChain, GuestError, VmControl, new_from };
 use crate::virtio_bindings::*;
@@ -22,13 +24,13 @@ pub struct VirtioNet {
     rx_pending: Arc<Mutex<VecDeque<Vec<u8>>>>
 }
 
-fn open_tap(name: &str) -> io::Result<File> {
+fn open_tap(name: &str) -> Result<File> {
     let tap = OpenOptions::new().read(true).write(true).open("/dev/net/tun")
-        .map_err(|e| io::Error::new(e.kind(), format!("cannot open /dev/net/tun: {}", e)))?;
+        .context("cannot open /dev/net/tun")?;
 
     let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
     if name.len() >= ifr.ifr_name.len() {
-        return Err(io::Error::other(format!("name is too long (at most {} bytes)", ifr.ifr_name.len() - 1)));
+        bail!("name is too long (at most {} bytes)", ifr.ifr_name.len() - 1);
     }
     for (d, s) in ifr.ifr_name.iter_mut().zip(name.bytes()) { *d = s as libc::c_char; }
     ifr.ifr_ifru.ifru_flags = (libc::IFF_TAP | libc::IFF_NO_PI | libc::IFF_VNET_HDR) as libc::c_short;
@@ -40,12 +42,9 @@ fn open_tap(name: &str) -> io::Result<File> {
         let hint = if e.kind() == io::ErrorKind::PermissionDenied {
             " (does the tap exist and belong to you? sudo ./make-tap.sh up makes one)"
         } else { "" };
-        return Err(io::Error::new(e.kind(), format!("cannot attach: {}{}", e, hint)));
+        bail!("cannot attach: {}{}", e, hint);
     }
-    if unsafe { libc::ioctl(tap.as_raw_fd(), libc::TUNSETVNETHDRSZ, &VIRTIO_NET_HDR_SIZE) } < 0 {
-        let e = io::Error::last_os_error();
-        return Err(io::Error::new(e.kind(), format!("cannot set the vnet header size: {}", e)));
-    }
+    syscall_check("TUNSETVNETHDRSZ", unsafe { libc::ioctl(tap.as_raw_fd(), libc::TUNSETVNETHDRSZ, &VIRTIO_NET_HDR_SIZE) })?;
     Ok(tap)
 }
 
@@ -77,9 +76,8 @@ fn start_rx_thread(mut tap: File, rx_pending: Arc<Mutex<VecDeque<Vec<u8>>>>, con
 }
 
 impl VirtioNet {
-    pub fn new(tap_name: &str, control: Arc<VmControl>) -> io::Result<Self> {
-        let tap = open_tap(tap_name)
-            .map_err(|e| io::Error::new(e.kind(), format!("--tap {}: {}", tap_name, e)))?;
+    pub fn new(tap_name: &str, control: Arc<VmControl>) -> Result<Self> {
+        let tap = open_tap(tap_name).with_context(|| format!("--tap {}", tap_name))?;
         let rx_pending = Arc::new(Mutex::new(VecDeque::new()));
         start_rx_thread(tap.try_clone()?, rx_pending.clone(), control);
         Ok(Self { tap, rx_pending })
@@ -109,7 +107,7 @@ impl VirtioDevice for VirtioNet {
         }
     }
 
-    fn read_config(&mut self, offset: u32, data: &mut [u8]) -> io::Result<()> {
+    fn read_config(&mut self, offset: u32, _data: &mut [u8]) -> Result<()> {
         match offset {
             _   => println!("Unknown config at {:#x}", offset)
         };

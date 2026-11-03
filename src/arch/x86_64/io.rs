@@ -1,4 +1,5 @@
-use std::io::{ self };
+use anyhow::Result;
+use crate::syscall_check;
 use crate::{ VM, VCPU, IO, IODevice, KVMIO, TTY, VmControl, VmConfig, SerialSpec, SerialOut, start_serial, kvm_irq_level, gpa_to_host, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
@@ -8,18 +9,14 @@ use super::vga::{ Vga, VGA_PORTS, VGA_FRAMEBUFFER, VGA_FRAMEBUFFER_SIZE, VGA_DAC
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
-pub fn arch_update_irq(level: u32, vm_fd: libc::c_int, num: u32) -> io::Result<()> {
+pub fn arch_update_irq(level: u32, vm_fd: libc::c_int, num: u32) -> Result<()> {
     let mut irq : kvm_irq_level = unsafe { std::mem::zeroed() };
     irq.level = level;
     irq.__bindgen_anon_1.irq = num;
 
-    let ret = unsafe {
+    syscall_check("KVM_IRQ_LINE", unsafe {
         libc::ioctl(vm_fd, KVM_IRQ_LINE, &mut irq)
-    };
-
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    })?;
 
     Ok(())
 }
@@ -42,14 +39,14 @@ pub struct UART {
 }
 
 impl TTY for UART {
-    fn send_char(&mut self, ch: u8) -> io::Result<()> {
+    fn send_char(&mut self, ch: u8) -> Result<()> {
         self.rx.push_back(ch);
         self.update_irq()
     }
 }
 
 impl UART {
-    fn update_irq(&mut self) -> io::Result<()> {
+    fn update_irq(&mut self) -> Result<()> {
         let level = self.mcr & 0x08 != 0
             && ((self.ier & 0x01 != 0 && !self.rx.is_empty())
             || (self.ier & 0x02 != 0 && self.thr_ipending));
@@ -62,7 +59,7 @@ impl UART {
         Ok(())
     }
 
-    fn new(vm_fd: libc::c_int, control: Arc<VmControl>, serial: &SerialSpec) -> io::Result<Arc<Mutex<Self>>> {
+    fn new(vm_fd: libc::c_int, control: Arc<VmControl>, serial: &SerialSpec) -> Result<Arc<Mutex<Self>>> {
         let uart = Arc::new(Mutex::new(UART { ier: 0x0, fcr: 0x0, lcr: 0x0, mcr: 0x0, lsr: 0x0, msr: 0x0, scr: 0x0, thr_ipending: false, irq_level: false, vm_fd, rx: VecDeque::new(), out: SerialOut::default() }));
 
         let out = start_serial(serial, uart.clone(), control)?;
@@ -72,7 +69,7 @@ impl UART {
 }
 
 impl IODevice for UART {
-    fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
+    fn handle(&mut self, io: &IO, base: *mut u8) -> Result<()> {
         let port = io.port;
         let direction = io.direction as u32;
         let size = io.size as usize;
@@ -138,7 +135,7 @@ pub enum DeviceId {
 }
 
 impl VM {
-    pub fn arch_init_io_devices(&mut self, vcpu: &VCPU, config: &VmConfig) -> io::Result<()> {
+    pub fn arch_init_io_devices(&mut self, vcpu: &VCPU, config: &VmConfig) -> Result<()> {
         let uart = UART::new(self.fd, self.control.clone(), &config.serial)?;
         self.io_devices.insert(DeviceId::Uart as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
         let i8042 = I8042::new(self.fd, self.control.clone());
@@ -161,7 +158,7 @@ impl VM {
         Ok(())
     }
 
-    pub fn arch_handle_io(&self, io: &IO, base: *mut u8) -> io::Result<()> {
+    pub fn arch_handle_io(&self, io: &IO, base: *mut u8) -> Result<()> {
         let dev: DeviceId = match io.port {
             0x3f8..=0x3ff => DeviceId::Uart,
             I8042_DATA | I8042_COMMAND => DeviceId::I8042,

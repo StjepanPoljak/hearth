@@ -6,6 +6,7 @@
 macro_rules! println {
     ($($arg:tt)*) => {{ use std::io::Write; let _ = writeln!(std::io::stdout(), $($arg)*); }}
 }
+#[allow(unused_macros)]
 macro_rules! print {
     ($($arg:tt)*) => {{ use std::io::Write; let _ = write!(std::io::stdout(), $($arg)*); }}
 }
@@ -21,6 +22,7 @@ macro_rules! eprint {
 mod kvm_bindings {
     include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 }
+use anyhow::{ anyhow, bail, Context, Result };
 use kvm_bindings::*;
 
 include!("frontend/mod.rs");
@@ -51,13 +53,13 @@ type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
 type GuestMemory = Vec<Arc<MemRegion>>;
 
 pub trait MMIODevice: Send {
-    fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> io::Result<()>;
+    fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> Result<()>;
     /* Picks up work that arrived from outside the guest, see VmControl::kick(). */
-    fn poll(&mut self, _mem: &GuestMemory) -> io::Result<()> { Ok(()) }
+    fn poll(&mut self, _mem: &GuestMemory) -> Result<()> { Ok(()) }
 }
 
 pub trait IODevice: Send {
-    fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()>;
+    fn handle(&mut self, io: &IO, base: *mut u8) -> Result<()>;
 }
 
 thread_local! {
@@ -259,7 +261,7 @@ pub struct Args {
 
 impl Args {
     /* The --config file's settings, overridden by the flags given. */
-    fn vm_config(&self) -> io::Result<VmConfig> {
+    fn vm_config(&self) -> Result<VmConfig> {
         let mut config = match &self.config {
             Some(path) => VmConfig::load(path)?,
             None => VmConfig::default()
@@ -278,7 +280,7 @@ impl Args {
         if let Some(serial) = &self.serial {
             config.serial = serial.clone();
         }
-        config.validate().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        config.validate().map_err(|e| anyhow!(e))?;
         Ok(config)
     }
 }
@@ -299,7 +301,7 @@ pub struct KvmDev {
 }
 
 impl KvmDev {
-    fn new() -> io::Result<Self> {
+    fn new() -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -307,20 +309,14 @@ impl KvmDev {
             .expect("Failed to open /dev/kvm");
 
         // 140904 ioctl(3</dev/kvm<char 10:232>>, 0xae04 /* KVM_GET_VCPU_MMAP_SIZE */, 0) = 12288
-        let kvm_run_size = unsafe { libc::ioctl(file.as_raw_fd(), KVM_GET_VCPU_MMAP_SIZE, 0usize) };
-        if kvm_run_size < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let kvm_run_size = syscall_check("KVM_GET_VCPU_MMAP_SIZE", unsafe { libc::ioctl(file.as_raw_fd(), KVM_GET_VCPU_MMAP_SIZE, 0usize) })?;
         
         Ok(Self { file, kvm_run_size: kvm_run_size as usize })
     }
 
-    fn create_vm(&self) -> io::Result<VM> {
+    fn create_vm(&self) -> Result<VM> {
         // 140900 ioctl(3</dev/kvm<char 10:232>>, 0xae01 /* KVM_CREATE_VM */, 0) = 9<anon_inode:kvm-vm>
-        let vm_fd = unsafe { libc::ioctl(self.fd(), KVM_CREATE_VM, 0usize) };
-        if vm_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let vm_fd = syscall_check("KVM_CREATE_VM", unsafe { libc::ioctl(self.fd(), KVM_CREATE_VM, 0usize) })?;
 
         Ok(VM {
             fd: vm_fd,
@@ -371,15 +367,15 @@ impl MemRegion {
     /* Adds an allocator handing out gpa_start..gpa_end, which must lie in
      * this region and clear of its other allocators. Returns its index in
      * allocators. */
-    pub fn add_bump_allocator(&mut self, gpa_start: u64, gpa_end: u64) -> io::Result<usize> {
+    pub fn add_bump_allocator(&mut self, gpa_start: u64, gpa_end: u64) -> Result<usize> {
         let region_end = self.guest_phys_addr + self.mem_size as u64;
         if gpa_start > gpa_end || gpa_start < self.guest_phys_addr || gpa_end > region_end {
-            return Err(io::Error::other(format!("Allocator {:#x}..{:#x} is not inside region {:#x}..{:#x}.",
-                                                gpa_start, gpa_end, self.guest_phys_addr, region_end)));
+            bail!("Allocator {:#x}..{:#x} is not inside region {:#x}..{:#x}.",
+                                                gpa_start, gpa_end, self.guest_phys_addr, region_end);
         }
         if let Some(other) = self.allocators.iter().find(|a| gpa_start < a.gpa_end() && a.gpa_start() < gpa_end) {
-            return Err(io::Error::other(format!("Allocator {:#x}..{:#x} overlaps {:#x}..{:#x}.",
-                                                gpa_start, gpa_end, other.gpa_start(), other.gpa_end())));
+            bail!("Allocator {:#x}..{:#x} overlaps {:#x}..{:#x}.",
+                                                gpa_start, gpa_end, other.gpa_start(), other.gpa_end());
         }
         let host_start = unsafe { (self.mem_ptr as *mut u8).add((gpa_start - self.guest_phys_addr) as usize) };
         self.allocators.push(BumpAllocator::new(gpa_start, gpa_end, host_start));
@@ -409,7 +405,7 @@ pub struct DirtyLog {
 impl DirtyLog {
     /* A bit per page, set if the page was written; fetching clears the
      * log, so a write made after this returns is in the next one. */
-    pub fn fetch(&self) -> io::Result<Vec<u64>> {
+    pub fn fetch(&self) -> Result<Vec<u64>> {
         /* KVM copies whole longs. */
         let mut bitmap = vec![0u64; self.pages.div_ceil(64)];
         let log = kvm_dirty_log {
@@ -417,10 +413,7 @@ impl DirtyLog {
             padding1: 0,
             __bindgen_anon_1: kvm_dirty_log__bindgen_ty_1 { dirty_bitmap: bitmap.as_mut_ptr().cast() }
         };
-        let ret = unsafe { libc::ioctl(self.vm_fd, KVM_GET_DIRTY_LOG, &log) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        syscall_check("KVM_GET_DIRTY_LOG", unsafe { libc::ioctl(self.vm_fd, KVM_GET_DIRTY_LOG, &log) })?;
         Ok(bitmap)
     }
 }
@@ -504,32 +497,26 @@ fn write_guest_ptr<T>(ptr: *mut u8, data: T) {
 }
 
 impl VM {
-    fn create_vcpu(&self, id: u32, kvm_run_size: usize) -> io::Result<VCPU> {
+    fn create_vcpu(&self, id: u32, kvm_run_size: usize) -> Result<VCPU> {
         // 140904 ioctl(9<anon_inode:kvm-vm>, 0xae41 /* KVM_CREATE_VCPU */, 0) = 10<anon_inode:kvm-vcpu:0>
-        let vcpu_fd = unsafe { libc::ioctl(self.fd, KVM_CREATE_VCPU, id as usize) };
-        if vcpu_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let vcpu_fd = syscall_check("KVM_CREATE_VCPU", unsafe { libc::ioctl(self.fd, KVM_CREATE_VCPU, id as usize) })?;
 
         let mut vcpu = VCPU { id, fd: vcpu_fd, kvm_run_mem: std::ptr::null_mut(), kvm_run_size, breakpoints: vec![] };
         vcpu.map_kvm_run()?;
         Ok(vcpu)
     }
 
-    fn add_mem_region(&mut self, mem_size: usize, guest_phys_addr: u64) -> io::Result<usize> {
+    fn add_mem_region(&mut self, mem_size: usize, guest_phys_addr: u64) -> Result<usize> {
         // 140900 mmap(NULL, 1075838976, 0 /* PROT_NONE */, 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */, -1, 0) = 0x7768b3e00000
         // 140900 mmap(0x7768b3e00000, 1073741824, 0x3 /* PROT_READ|PROT_WRITE */, 0x32 /* MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS */, -1, 0) = 0x7768b3e00000
-        let mem_ptr = unsafe {
+        let mem_ptr = mmap_check("mmap of guest memory", unsafe {
             libc::mmap(std::ptr::null_mut(),
                        mem_size as usize,
                        libc::PROT_READ|libc::PROT_WRITE,
                        libc::MAP_PRIVATE|libc::MAP_ANONYMOUS,
                        -1,
                        0)
-        };
-        if mem_ptr == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
+        })?;
 
         let id = self.next_slot;
         self.next_slot += 1;
@@ -542,13 +529,10 @@ impl VM {
 
     /* A memory_size of 0 deletes the slot. */
     fn set_user_memory_region(&self, slot: u32, flags: u32, guest_phys_addr: u64,
-                              memory_size: u64, userspace_addr: u64) -> io::Result<()> {
+                              memory_size: u64, userspace_addr: u64) -> Result<()> {
         // 140900 ioctl(9<anon_inode:kvm-vm>, 0x4020ae46 /* KVM_SET_USER_MEMORY_REGION */, {slot=0, flags=0, guest_phys_addr=0, memory_size=1073741824, userspace_addr=0x7768b3e00000}) = 0
         let region = kvm_userspace_memory_region { slot, flags, guest_phys_addr, memory_size, userspace_addr };
-        let ret = unsafe { libc::ioctl(self.fd, KVM_SET_USER_MEMORY_REGION, &region) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        syscall_check("KVM_SET_USER_MEMORY_REGION", unsafe { libc::ioctl(self.fd, KVM_SET_USER_MEMORY_REGION, &region) })?;
         Ok(())
     }
 
@@ -557,19 +541,16 @@ impl VM {
      * range is deleted and added again as up to three: before, logged,
      * after. The mapping stays one piece. The range must not overlap one
      * logged before; call before the vcpus run. */
-    pub fn log_dirty_pages(&mut self, gpa: u64, size: usize) -> io::Result<DirtyLog> {
+    pub fn log_dirty_pages(&mut self, gpa: u64, size: usize) -> Result<DirtyLog> {
         let start = gpa & !(PAGE_SIZE - 1);
         let end = (gpa + size as u64).next_multiple_of(PAGE_SIZE);
         let idx = self.slots.iter()
             .position(|s| !s.logged && s.guest_phys_addr <= start && end <= s.guest_phys_addr + s.size)
-            .ok_or(io::Error::other(format!("No unlogged memory slot covers {:#x}..{:#x}.", start, end)))?;
+            .ok_or(anyhow!("No unlogged memory slot covers {:#x}..{:#x}.", start, end))?;
 
         /* Its own fd, as frontends may fetch it after the VM is dropped.
          * Taken first, so a failure here leaves the slots untouched. */
-        let vm_fd = unsafe { libc::dup(self.fd) };
-        if vm_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let vm_fd = syscall_check("dup of the VM fd", unsafe { libc::dup(self.fd) })?;
 
         let old = &self.slots[idx];
         let (old_id, old_gpa, old_size, old_host) = (old.id, old.guest_phys_addr, old.size, old.userspace_addr);
@@ -608,7 +589,7 @@ impl VM {
 
     /* Deletes slot old_id and adds pieces in its place. On error, KVM may
      * hold some of the pieces; the caller undoes it. */
-    fn replace_slot(&self, old_id: u32, old_gpa: u64, old_host: u64, pieces: &[Slot]) -> io::Result<()> {
+    fn replace_slot(&self, old_id: u32, old_gpa: u64, old_host: u64, pieces: &[Slot]) -> Result<()> {
         self.set_user_memory_region(old_id, 0, old_gpa, 0, old_host)?;
         for piece in pieces {
             let flags = if piece.logged { KVM_MEM_LOG_DIRTY_PAGES } else { 0 };
@@ -622,7 +603,7 @@ impl VM {
      * if KVM can't. Once per VM: the ring is shared by every zone. It
      * is mapped through a vcpu, and on its own, so a frontend can keep
      * reading it after the vcpus are gone. */
-    pub fn coalesce_pio(&self, vcpu: &VCPU, port: u16, len: u32) -> io::Result<Option<CoalescedRing>> {
+    pub fn coalesce_pio(&self, vcpu: &VCPU, port: u16, len: u32) -> Result<Option<CoalescedRing>> {
         let supported = unsafe { libc::ioctl(self.fd, KVM_CHECK_EXTENSION, KVM_CAP_COALESCED_PIO as usize) };
         if supported <= 0 {
             return Ok(None);
@@ -632,35 +613,29 @@ impl VM {
             size: len,
             __bindgen_anon_1: kvm_coalesced_mmio_zone__bindgen_ty_1 { pio: 1 }
         };
-        let ret = unsafe { libc::ioctl(self.fd, KVM_REGISTER_COALESCED_MMIO, &zone) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let ring = unsafe {
+        syscall_check("KVM_REGISTER_COALESCED_MMIO", unsafe { libc::ioctl(self.fd, KVM_REGISTER_COALESCED_MMIO, &zone) })?;
+        let ring = mmap_check("mmap of the coalesced MMIO ring", unsafe {
             libc::mmap(std::ptr::null_mut(),
                        PAGE_SIZE as usize,
                        libc::PROT_READ|libc::PROT_WRITE,
                        libc::MAP_SHARED,
                        vcpu.fd,
                        (KVM_COALESCED_MMIO_PAGE_OFFSET as u64 * PAGE_SIZE) as libc::off_t)
-        };
-        if ring == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
+        })?;
         Ok(Some(CoalescedRing { ring: ring.cast() }))
     }
 
-    fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> io::Result<usize> {
+    fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> Result<usize> {
         let mem_region = self.guest_memory
             .get(mem_region_idx)
-            .ok_or(io::Error::other("Index exceeds memory region vector."))?;
+            .ok_or(anyhow!("Index exceeds memory region vector."))?;
 
         if (offset as usize) >= mem_region.mem_size {
-            return Err(io::Error::other("Offset exceeds memory region."));
+            bail!("Offset exceeds memory region.");
         }
 
         if (offset as usize) + data.len() > mem_region.mem_size {
-            return Err(io::Error::other(format!("Data ({:#x} {:#x}) would exceed memory region ({}).", offset, data.len(), mem_region.mem_size)));
+            bail!("Data ({:#x} {:#x}) would exceed memory region ({}).", offset, data.len(), mem_region.mem_size);
         }
 
         unsafe {
@@ -672,7 +647,7 @@ impl VM {
         Ok(data.len())
     }
 
-    fn load_file_to_memory(&self, mem_region_idx: usize, path: &str, offset: u64) -> io::Result<usize> {
+    fn load_file_to_memory(&self, mem_region_idx: usize, path: &str, offset: u64) -> Result<usize> {
         let res = read_file(path)?;
 
         println!("Loading {:?} at {:#x}...\r", path, offset + self.guest_memory[mem_region_idx].guest_phys_addr);
@@ -684,22 +659,22 @@ impl VM {
      * nothing else holds it, i.e. while the VM is being set up. Only the
      * x86 loader uses allocators so far. */
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-    fn mem_region_mut(&mut self, mem_region_idx: usize) -> io::Result<&mut MemRegion> {
+    fn mem_region_mut(&mut self, mem_region_idx: usize) -> Result<&mut MemRegion> {
         let region = self.guest_memory
             .get_mut(mem_region_idx)
-            .ok_or(io::Error::other("Index exceeds memory region vector."))?;
-        Arc::get_mut(region).ok_or(io::Error::other("Memory region is already shared."))
+            .ok_or(anyhow!("Index exceeds memory region vector."))?;
+        Arc::get_mut(region).ok_or(anyhow!("Memory region is already shared."))
     }
 
-    fn load_linux(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
+    fn load_linux(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> Result<()> {
         self.arch_load_linux(vcpu, config)
     }
 
-    fn init_mmio_devices(&mut self, config: &VmConfig) -> io::Result<()> {
+    fn init_mmio_devices(&mut self, config: &VmConfig) -> Result<()> {
         self.arch_init_mmio_devices(config)
     }
 
-    fn init_io_devices(&mut self, vcpu: &VCPU, config: &VmConfig) -> io::Result<()> {
+    fn init_io_devices(&mut self, vcpu: &VCPU, config: &VmConfig) -> Result<()> {
         self.arch_init_io_devices(vcpu, config)
     }
 
@@ -707,7 +682,7 @@ impl VM {
         self.mmio_devices.insert(addr >> 12, device);
     }
 
-    fn handle_mmio(&self, mmio: &mut MMIO) -> io::Result<()> {
+    fn handle_mmio(&self, mmio: &mut MMIO) -> Result<()> {
         let page = mmio.phys_addr >> 12;
         if let Some(device) = self.mmio_devices.get(&page) {
             device.lock().unwrap().handle(mmio, &self.guest_memory)?;
@@ -715,11 +690,11 @@ impl VM {
         Ok(())
     }
 
-    fn handle_io(&self, io: &IO, base: *mut u8) -> io::Result<()> {
+    fn handle_io(&self, io: &IO, base: *mut u8) -> Result<()> {
         self.arch_handle_io(io, base)
     }
 
-    fn poll_mmio_devices(&self) -> io::Result<()> {
+    fn poll_mmio_devices(&self) -> Result<()> {
         for device in self.mmio_devices.values() {
             device.lock().unwrap().poll(&self.guest_memory)?;
         }
@@ -729,7 +704,7 @@ impl VM {
     /* Runs each vcpu on its own thread until the VM stops. The first vcpu
      * to leave its run loop stops the others; the first error is returned,
      * or else why the VM stopped. */
-    fn run(self, vcpus: Vec<VCPU>) -> io::Result<VmExit> {
+    fn run(self, vcpus: Vec<VCPU>) -> Result<VmExit> {
         unsafe { install_kick_handler() };
 
         let vm = Arc::new(self);
@@ -750,13 +725,13 @@ impl VM {
                 });
             match thread {
                 Ok(thread) => threads.push(thread),
-                Err(e) => { vm.control.halt_vcpus(); res = Err(e); break; }
+                Err(e) => { vm.control.halt_vcpus(); res = Err(anyhow::Error::new(e).context("cannot start a vcpu thread")); break; }
             }
         }
 
         for thread in threads {
             let thread_res = thread.join()
-                .unwrap_or_else(|_| Err(io::Error::other("vCPU thread panicked.")));
+                .unwrap_or_else(|_| Err(anyhow!("vCPU thread panicked.")));
             if res.is_ok() {
                 res = thread_res.map(|_| ());
             }
@@ -788,26 +763,22 @@ pub struct VCPU {
 unsafe impl Send for VCPU {}
 
 impl VCPU {
-    fn map_kvm_run(&mut self) -> io::Result<()> {
+    fn map_kvm_run(&mut self) -> Result<()> {
         // 140904 mmap(NULL, 12288, 0x3 /* PROT_READ|PROT_WRITE */, 0x1 /* MAP_SHARED */, 10<anon_inode:kvm-vcpu:0>, 0) = 0x7769050b0000
-        self.kvm_run_mem = unsafe {
+        self.kvm_run_mem = mmap_check("mmap of kvm_run", unsafe {
             libc::mmap(std::ptr::null_mut(),
                        self.kvm_run_size,
                        libc::PROT_READ|libc::PROT_WRITE,
                        libc::MAP_SHARED,
                        self.fd,
                        0)
-        };
-        if self.kvm_run_mem == libc::MAP_FAILED {
-            self.kvm_run_mem = std::ptr::null_mut();
-            return Err(io::Error::last_os_error());
-        }
+        })?;
         Ok(())
     }
 
     /* Runs the vcpu on the calling thread until it exits or the VM stops. */
     /* None when the vcpu left because the VM was stopped from elsewhere. */
-    fn run(&mut self, vm: &VM) -> io::Result<Option<VmExit>> {
+    fn run(&mut self, vm: &VM) -> Result<Option<VmExit>> {
         KVM_RUN_PTR.set(self.kvm_run_mem as *mut kvm_run);
         vm.control.register_vcpu_thread();
         let res = self.run_loop(vm);
@@ -816,7 +787,7 @@ impl VCPU {
         res
     }
 
-    fn run_loop(&mut self, vm: &VM) -> io::Result<Option<VmExit>> {
+    fn run_loop(&mut self, vm: &VM) -> Result<Option<VmExit>> {
         let run = self.kvm_run_mem as *mut kvm_run;
 
         loop {
@@ -836,7 +807,7 @@ impl VCPU {
                     continue;
                 }
                 self.print_regs()?;
-                return Err(io::Error::new(e.kind(), format!("KVM_RUN: {}", e)));
+                return Err(e).context("KVM_RUN");
             }
 
             let exit_reason = unsafe { (*run).exit_reason };
@@ -864,15 +835,15 @@ impl VCPU {
                     for i in 0..internal.ndata {
                         println!("{:4}: {:#x}", i, internal.data[i as usize]);
                     }
-                    return Err(io::Error::other("KVM internal error."));
+                    bail!("KVM internal error.");
                 }
                 KVM_EXIT_SYSTEM_EVENT => {
                     let event = unsafe { (*run).__bindgen_anon_1.system_event };
                     match event.type_ {
                         KVM_SYSTEM_EVENT_SHUTDOWN => return Ok(Some(VmExit::PoweredOff)),
                         KVM_SYSTEM_EVENT_RESET => return Ok(Some(VmExit::Reset)),
-                        KVM_SYSTEM_EVENT_CRASH => return Err(io::Error::other("Guest crashed (KVM_SYSTEM_EVENT_CRASH).")),
-                        other => return Err(io::Error::other(format!("Unexpected KVM system event {}.", other)))
+                        KVM_SYSTEM_EVENT_CRASH => bail!("Guest crashed (KVM_SYSTEM_EVENT_CRASH)."),
+                        other => bail!("Unexpected KVM system event {}.", other)
                     }
                 }
                 KVM_EXIT_FAIL_ENTRY => {
@@ -880,11 +851,11 @@ impl VCPU {
                     let reason = fail_entry.hardware_entry_failure_reason;
                     let cpu = fail_entry.cpu;
                     self.print_regs()?;
-                    return Err(io::Error::other(format!(
-                        "KVM could not enter the guest: hardware entry failure reason {:#x} on CPU {}.", reason, cpu)));
+                    bail!(
+                        "KVM could not enter the guest: hardware entry failure reason {:#x} on CPU {}.", reason, cpu);
                 }
                 _ => {
-                    return Err(io::Error::other(format!("Unexpected KVM exit reason {}.", exit_reason)));
+                    bail!("Unexpected KVM exit reason {}.", exit_reason);
                 }
             }
         }
@@ -924,17 +895,15 @@ unsafe fn install_kick_handler() {
 
 /* Names the calling thread, and with it every thread it starts unnamed;
  * the main thread's name is the process's. The kernel keeps 15 bytes. */
-fn set_process_name(name: &str) -> io::Result<()> {
+fn set_process_name(name: &str) -> Result<()> {
     let mut comm = [0u8; 16];
     let len = name.floor_char_boundary(15);
     comm[..len].copy_from_slice(&name.as_bytes()[..len]);
-    if unsafe { libc::prctl(libc::PR_SET_NAME, comm.as_ptr()) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    syscall_check("prctl(PR_SET_NAME)", unsafe { libc::prctl(libc::PR_SET_NAME, comm.as_ptr()) })?;
     Ok(())
 }
 
-fn print_dirty_pages(log: &DirtyLog) -> io::Result<()> {
+fn print_dirty_pages(log: &DirtyLog) -> Result<()> {
     let bitmap = log.fetch()?;
     let pages: Vec<u64> = (0..bitmap.len() * 64)
         .filter(|n| bitmap[n / 64] & (1 << (n % 64)) != 0)
@@ -964,13 +933,13 @@ fn main() {
             println!("{}", message);
         },
         Err(e) => {
-            eprintln!("hearth: {}", e);
+            eprintln!("hearth: {:#}", e);
             std::process::exit(1);
         }
     }
 }
 
-fn run(args: &Args, config: &VmConfig) -> io::Result<VmExit> {
+fn run(args: &Args, config: &VmConfig) -> Result<VmExit> {
     if let Some(name) = &config.name {
         set_process_name(name)?;
     }
@@ -1005,7 +974,7 @@ fn run(args: &Args, config: &VmConfig) -> io::Result<VmExit> {
         };
         let breakpoints = args.breakpoints.iter()
             .map(|spec| resolve_breakpoint(spec, elf_data.as_deref()))
-            .collect::<io::Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         vcpu.set_breakpoints(breakpoints)?;
         for bp in &vcpu.breakpoints {
             println!("Breakpoint {} at {:#x}.\r", bp.label, bp.addr);
@@ -1026,7 +995,7 @@ fn run(args: &Args, config: &VmConfig) -> io::Result<VmExit> {
     if let Some(log) = dirty_log {
         /* The VM's own error matters more; only report this one. */
         if let Err(e) = print_dirty_pages(&log) {
-            eprintln!("Dirty log: cannot fetch: {}\r", e);
+            eprintln!("Dirty log: cannot fetch: {:#}\r", e);
         }
     }
     res

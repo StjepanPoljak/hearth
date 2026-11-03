@@ -1,4 +1,4 @@
-use std::io::{ self };
+use anyhow::{ anyhow, Result };
 
 pub fn new_from<T>(bytes: &[u8], o: usize) -> Option<T> {
         let slice = bytes.get(o..o + std::mem::size_of::<T>())?;
@@ -29,13 +29,11 @@ pub fn write_le64(b: &mut [u8], o: usize, val: u64) -> () {
     b[o..(o + 8)].copy_from_slice(&val.to_le_bytes());
 }
 
-pub fn read_string(b: &[u8], o: usize) -> io::Result<String> {
+pub fn read_string(b: &[u8], o: usize) -> Result<String> {
     let end = b[o..]
         .iter()
-        .position(|&c| c == 0).ok_or(io::Error::other("Could not extract string."))?;
-    let res = std::str::from_utf8(&b[o..(o + end)])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .to_string();
+        .position(|&c| c == 0).ok_or(anyhow!("Could not extract string."))?;
+    let res = std::str::from_utf8(&b[o..(o + end)])?.to_string();
     Ok(res)
 }
 

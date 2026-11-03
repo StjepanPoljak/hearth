@@ -1,4 +1,4 @@
-use std::io::{ self };
+use anyhow::Result;
 use std::sync::{ Arc, Mutex };
 use std::time::Instant;
 use std::ops::Range;
@@ -254,7 +254,7 @@ impl IODevice for Vga {
     /* A word access (outw to an index port sets index and data at once)
      * is a byte access to port and port + 1; a rep string access repeats
      * on the same port. */
-    fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
+    fn handle(&mut self, io: &IO, base: *mut u8) -> Result<()> {
         self.apply_queued_writes();
         let size = io.size as usize;
         let data = unsafe { std::slice::from_raw_parts_mut(base.add(io.data_offset as usize), size * io.count as usize) };

@@ -1,3 +1,5 @@
+use anyhow::{ Context, Result };
+use crate::syscall_check;
 use std::io::{ self, Write };
 use termion::raw::IntoRawMode;
 use std::io::{ stdin, stdout, Read };
@@ -10,7 +12,7 @@ use std::sync::{ Arc, Mutex };
 use std::collections::VecDeque;
 
 pub trait TTY: Send {
-    fn send_char(&mut self, ch: u8) -> io::Result<()>;
+    fn send_char(&mut self, ch: u8) -> Result<()>;
 }
 
 /* Where the guest's serial port is connected, from --serial. */
@@ -102,7 +104,7 @@ pub fn restore_tty(tty: &libc::termios) {
 
 /* Connects the serial port as `spec` says: returns where the UART writes
  * the guest's output, and starts a thread feeding input to `uart`. */
-pub fn start_serial(spec: &SerialSpec, uart: Arc<Mutex<dyn TTY>>, control: Arc<VmControl>) -> io::Result<SerialOut> {
+pub fn start_serial(spec: &SerialSpec, uart: Arc<Mutex<dyn TTY>>, control: Arc<VmControl>) -> Result<SerialOut> {
     let out = SerialOut::default();
     match spec {
         SerialSpec::Stdio => {
@@ -117,7 +119,7 @@ pub fn start_serial(spec: &SerialSpec, uart: Arc<Mutex<dyn TTY>>, control: Arc<V
         }
         SerialSpec::File(path) => {
             let file = OpenOptions::new().create(true).append(true).open(path)
-                .map_err(|e| io::Error::new(e.kind(), format!("--serial file:{}: {}", path, e)))?;
+                .with_context(|| format!("--serial file:{}", path))?;
             out.connect(Box::new(file));
         }
         SerialSpec::Unix(path) => {
@@ -126,7 +128,7 @@ pub fn start_serial(spec: &SerialSpec, uart: Arc<Mutex<dyn TTY>>, control: Arc<V
                 std::fs::remove_file(path)?;
             }
             let listener = UnixListener::bind(path)
-                .map_err(|e| io::Error::new(e.kind(), format!("--serial unix:{}: {}", path, e)))?;
+                .with_context(|| format!("--serial unix:{}", path))?;
             println!("Serial console on unix:{}\r", path);
             out.keep_backlog();
             let out = out.clone();
@@ -173,18 +175,21 @@ fn feed(mut input: impl Read + AsRawFd, uart: &Arc<Mutex<dyn TTY>>) {
 /* A pseudo-terminal in raw mode; returns its master and the slave's path.
  * The slave stays open (its fd is never closed), so reads on the master
  * wait for a client instead of failing while nobody has it open. */
-fn open_pty() -> io::Result<(File, String)> {
-    let check = |ret: libc::c_int| if ret < 0 { Err(io::Error::last_os_error()) } else { Ok(ret) };
-    let master = check(unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) })?;
+fn open_pty() -> Result<(File, String)> {
+    let master = syscall_check("posix_openpt", unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) })?;
     let master = unsafe { File::from_raw_fd(master) };
-    check(unsafe { libc::grantpt(master.as_raw_fd()) })?;
-    check(unsafe { libc::unlockpt(master.as_raw_fd()) })?;
+    syscall_check("grantpt", unsafe { libc::grantpt(master.as_raw_fd()) })?;
+    syscall_check("unlockpt", unsafe { libc::unlockpt(master.as_raw_fd()) })?;
 
     let mut name = [0 as libc::c_char; 64];
-    check(unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) })?;
+    /* Returns the error number itself, not -1. */
+    let ret = unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) };
+    if ret != 0 {
+        return Err(io::Error::from_raw_os_error(ret)).context("ptsname_r");
+    }
     let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned();
 
-    let slave: RawFd = check(unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) })?;
+    let slave: RawFd = syscall_check("open of the pty", unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) })?;
     let mut tty: libc::termios = unsafe { std::mem::zeroed() };
     unsafe {
         libc::tcgetattr(slave, &mut tty);

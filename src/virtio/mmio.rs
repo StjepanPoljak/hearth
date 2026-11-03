@@ -1,4 +1,4 @@
-use std::io::{ self };
+use anyhow::Result;
 use crate::{ MMIO, MMIODevice, GuestMemory, GuestError, VringQueue, DescChain, VRING_QUEUES_MAX };
 use crate::{ read_le32, write_le32 };
 use crate::arch::arch_update_irq;
@@ -18,7 +18,7 @@ pub trait VirtioDevice: Send {
     fn features(&self, sel: u32) -> u32;
     /* 0 means the queue does not exist. */
     fn queue_num_max(&self, queue: u32) -> u32;
-    fn read_config(&mut self, offset: u32, data: &mut [u8]) -> io::Result<()>;
+    fn read_config(&mut self, offset: u32, data: &mut [u8]) -> Result<()>;
     /* Handles one request and returns the number of bytes written to the
      * guest. Host failures are the device's to report to the guest, e.g. as
      * an I/O error status; an Err is the guest's fault and breaks the device. */
@@ -62,7 +62,7 @@ impl<D: VirtioDevice> VirtioMmio<D> {
         self.queue.get_mut(self.curr_queue as usize)
     }
 
-    fn queue_notify(&mut self, queue_idx: u32, mem: &GuestMemory) -> io::Result<()> {
+    fn queue_notify(&mut self, queue_idx: u32, mem: &GuestMemory) -> Result<()> {
         if self.needs_reset {
             return Ok(());
         }
@@ -95,7 +95,7 @@ impl<D: VirtioDevice> VirtioMmio<D> {
 
     /* The spec has the device set DEVICE_NEEDS_RESET and send a
      * configuration change notification. */
-    fn fail(&mut self, e: GuestError) -> io::Result<()> {
+    fn fail(&mut self, e: GuestError) -> Result<()> {
         println!("{}: {}; the device needs a reset.\r", self.device.name(), e);
         self.needs_reset = true;
         self.irq_status |= VIRTIO_MMIO_INT_CONFIG;
@@ -103,7 +103,7 @@ impl<D: VirtioDevice> VirtioMmio<D> {
     }
 
     /* Writing 0 to the status register resets the device. */
-    fn reset(&mut self) -> io::Result<()> {
+    fn reset(&mut self) -> Result<()> {
         self.dev_feat_sel = 0;
         self.drv_feat_sel = 0;
         self.status = 0;
@@ -116,7 +116,7 @@ impl<D: VirtioDevice> VirtioMmio<D> {
 }
 
 impl<D: VirtioDevice> MMIODevice for VirtioMmio<D> {
-    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> io::Result<()> {
+    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> Result<()> {
         let addr = (mmio.phys_addr & 0xfff) as u32;
         let read = mmio.is_write == 0;
         match (read, addr) {
@@ -246,7 +246,7 @@ impl<D: VirtioDevice> MMIODevice for VirtioMmio<D> {
         Ok(())
     }
 
-    fn poll(&mut self, mem: &GuestMemory) -> io::Result<()> {
+    fn poll(&mut self, mem: &GuestMemory) -> Result<()> {
         for queue_idx in 0..VRING_QUEUES_MAX as u32 {
             self.queue_notify(queue_idx, mem)?;
         }

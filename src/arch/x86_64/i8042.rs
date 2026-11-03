@@ -1,4 +1,4 @@
-use std::io::{ self };
+use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::{ Arc, Mutex };
 use crate::{ IO, IODevice, Keyboard, VmControl, VmExit, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
@@ -94,7 +94,7 @@ impl I8042 {
 
     /* Edge-triggered on the IOAPIC: the line has to drop between bytes,
      * which reading 0x60 does before the next byte is loaded. */
-    fn update_irq(&mut self) -> io::Result<()> {
+    fn update_irq(&mut self) -> Result<()> {
         let level = self.output.is_some() && self.config & CONFIG_KBD_INT != 0;
         if level != self.irq_level {
             self.irq_level = level;
@@ -103,7 +103,7 @@ impl I8042 {
         Ok(())
     }
 
-    fn read_data(&mut self) -> io::Result<u8> {
+    fn read_data(&mut self) -> Result<u8> {
         let byte = self.output.take().unwrap_or(0);
         self.update_irq()?;
         self.output = self.queue.pop_front();
@@ -203,7 +203,7 @@ impl I8042 {
 }
 
 impl IODevice for I8042 {
-    fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
+    fn handle(&mut self, io: &IO, base: *mut u8) -> Result<()> {
         let data = unsafe { std::slice::from_raw_parts_mut(base.add(io.data_offset as usize), io.size as usize) };
         match (io.direction as u32, io.port) {
             (KVM_EXIT_IO_IN, I8042_DATA) => data[0] = self.read_data()?,
@@ -228,7 +228,7 @@ impl IODevice for I8042 {
 }
 
 impl Keyboard for I8042 {
-    fn key_event(&mut self, down: bool, keysym: u32) -> io::Result<()> {
+    fn key_event(&mut self, down: bool, keysym: u32) -> Result<()> {
         if !self.scanning || self.config & CONFIG_KBD_DISABLE != 0 {
             return Ok(());
         }

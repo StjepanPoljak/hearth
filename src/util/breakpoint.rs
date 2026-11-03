@@ -1,6 +1,6 @@
+use anyhow::{ anyhow, Context, Result };
 use object::read::elf::ElfFile64;
 use object::{ Endianness, Object, ObjectSymbol };
-use std::io;
 
 /* A guest address to report when the vcpu is about to execute it, from
  * --break. The address is linear (virtual once the guest pages). Only
@@ -23,8 +23,8 @@ pub fn parse_number(s: &str) -> Result<u64, String> {
 
 /* ADDRESS, or SYMBOL[+OFFSET] looked up in the ELF symbol table of
  * elf_data. */
-pub fn resolve_breakpoint(spec: &str, elf_data: Option<&[u8]>) -> io::Result<Breakpoint> {
-    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
+pub fn resolve_breakpoint(spec: &str, elf_data: Option<&[u8]>) -> Result<Breakpoint> {
+    let invalid = |msg: String| anyhow!(msg);
     let breakpoint = |addr| Ok(Breakpoint { addr, label: spec.to_string(), hits: 0 });
 
     if spec.starts_with(|c: char| c.is_ascii_digit()) {
@@ -37,7 +37,7 @@ pub fn resolve_breakpoint(spec: &str, elf_data: Option<&[u8]>) -> io::Result<Bre
     };
     let elf_data = elf_data.ok_or(invalid(format!("Breakpoint {}: symbols need an ELF kernel.", spec)))?;
     let elf = ElfFile64::<Endianness>::parse(elf_data)
-        .map_err(|e| invalid(format!("Breakpoint {}: kernel is not an ELF: {}", spec, e)))?;
+        .with_context(|| format!("Breakpoint {}: kernel is not an ELF", spec))?;
     /* Defined symbols only: an undefined one has no address. */
     let symbol = elf.symbols()
         .find(|s| s.is_definition() && s.name() == Ok(name))
