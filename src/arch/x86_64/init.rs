@@ -1,6 +1,6 @@
 use crate::{ kvm_cpuid2, kvm_cpuid_entry2, kvm_pit_config };
 use crate::{ VCPU, VM, KvmDev, VmConfig, KVMIO, PAGE_SIZE };
-use crate::{ read_le64, read_le32, load_elf };
+use crate::{ read_le64, read_le32, load_elf, read_file };
 use libc::{_IOW, _IO, _IOWR};
 
 use object::read::elf::{ElfFile64, SectionHeader};
@@ -129,9 +129,10 @@ impl VM {
     }
 
     fn linux_pvh_boot(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
-        let vmlinux_data = std::fs::read(&config.linux.as_ref().unwrap())?;
+        let vmlinux_path = config.linux.as_ref().unwrap();
+        let vmlinux_data = read_file(vmlinux_path)?;
         let vmlinux = ElfFile64::<Endianness>::parse(&*vmlinux_data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{} is not an ELF file: {}", vmlinux_path, e)))?;
 
         let pvh_entrypoint = self.try_pvh_entrypoint(&vmlinux)?;
 
@@ -165,7 +166,7 @@ impl VM {
              * that look modules up by name; Linux ignores it. */
             let module_name = std::path::Path::new(initramfs_path)
                 .file_name().map_or(String::new(), |name| name.to_string_lossy().into_owned());
-            let initramfs = std::fs::read(initramfs_path)?;
+            let initramfs = read_file(initramfs_path)?;
 
             let modules = &mut region.allocators[module_alloc];
             let cmdline_paddr = modules.push(format!("{}\0", module_name).as_bytes())?;

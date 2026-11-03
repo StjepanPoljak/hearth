@@ -16,7 +16,7 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use clap::Parser;
 use std::fs::File;
-use std::io::{ self, Read };
+use std::io::{ self };
 use libc::{ _IOW, _IO };
 use std::collections::HashMap;
 use std::sync::{ Arc,Mutex };
@@ -611,9 +611,7 @@ impl VM {
     }
 
     fn load_file_to_memory(&self, mem_region_idx: usize, path: &str, offset: u64) -> io::Result<usize> {
-        let mut file = File::open(path)?;
-        let mut res = Vec::new();
-        file.read_to_end(&mut res)?;
+        let res = read_file(path)?;
 
         println!("Loading {:?} at {:#x}...\r", path, offset + self.guest_memory[mem_region_idx].guest_phys_addr);
 
@@ -874,15 +872,23 @@ fn print_dirty_pages(log: &DirtyLog) -> io::Result<()> {
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+fn main() {
     let args = Args::parse();
-    let config = match args.vm_config() {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("hearth: {}", e);
-            std::process::exit(1);
-        }
-    };
+    /* The serial frontend's thread may never get to restore the terminal
+     * when the guest stops the VM, or when setting up fails after it put
+     * the terminal in raw mode, so main restores it. */
+    let saved_tty = save_tty();
+    let res = args.vm_config().and_then(|config| run(&args, &config));
+    if let Some(tty) = saved_tty {
+        restore_tty(&tty);
+    }
+    if let Err(e) = res {
+        eprintln!("hearth: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run(args: &Args, config: &VmConfig) -> io::Result<()> {
     if let Some(name) = &config.name {
         set_process_name(name)?;
     }
@@ -904,7 +910,7 @@ fn main() -> io::Result<()> {
 
     /* Guest memory is complete before any device (and device thread) exists. */
     if let Some(_) = config.linux {
-        vm.load_linux(&mut vcpu, &config).unwrap();
+        vm.load_linux(&mut vcpu, config)?;
     } else if let Some(binary) = &config.binary {
         let mem_region_idx = vm.add_mem_region(config.memory.unwrap_or(256 << 10), 0x0)?;
         vm.load_file_to_memory(mem_region_idx, binary, config.load_addr)?;
@@ -912,7 +918,7 @@ fn main() -> io::Result<()> {
 
     if !args.breakpoints.is_empty() {
         let elf_data = match &config.linux {
-            Some(path) => Some(std::fs::read(path)?),
+            Some(path) => Some(read_file(path)?),
             None => None
         };
         let breakpoints = args.breakpoints.iter()
@@ -924,12 +930,8 @@ fn main() -> io::Result<()> {
         }
     }
 
-    /* The serial frontend's thread may never get to restore the terminal
-     * when the guest stops the VM, so main restores it. */
-    let saved_tty = save_tty();
-
-    vm.init_mmio_devices(&config)?;
-    vm.init_io_devices(&vcpu, &config)?;
+    vm.init_mmio_devices(config)?;
+    vm.init_io_devices(&vcpu, config)?;
     let dirty_log = match args.dirty_log {
         Some((gpa, size)) => Some(vm.log_dirty_pages(gpa, size)?),
         None => None
@@ -939,9 +941,6 @@ fn main() -> io::Result<()> {
     }
 
     let res = vm.run(vec![vcpu]);
-    if let Some(tty) = saved_tty {
-        restore_tty(&tty);
-    }
     if let Some(log) = dirty_log {
         /* The VM's own error matters more; only report this one. */
         if let Err(e) = print_dirty_pages(&log) {

@@ -1,6 +1,6 @@
 use libc::{ _IOWR,_IOW };
 use crate::{ KvmDev, VCPU, VM, VmConfig };
-use crate::{ read_le32, read_le64 };
+use crate::{ read_le32, read_le64, open_file, file_error };
 use crate::{ kvm_create_device, kvm_device_attr, kvm_device_type };
 use crate::{ KVM_VGIC_V2_ADDR_TYPE_DIST, KVM_VGIC_V2_ADDR_TYPE_CPU, KVM_DEV_ARM_VGIC_GRP_ADDR };
 
@@ -36,9 +36,9 @@ struct Arm64ImageHeader {
 }
 
 fn get_linux_header(path: &str) -> io::Result<Arm64ImageHeader> {
-    let mut file = File::open(path)?;
+    let mut file = open_file(path)?;
     let mut buf = [0u8; 64];
-    file.read_exact(&mut buf)?;
+    file.read_exact(&mut buf).map_err(file_error(path))?;
     Ok(Arm64ImageHeader{
         code0: read_le32(&buf, 0),
         code1: read_le32(&buf, 4),
@@ -106,7 +106,7 @@ impl VM {
     pub fn arch_load_linux(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
         let linux_path = config.linux.as_ref().ok_or(io::Error::other("No Linux image specified."))?;
         let header = get_linux_header(linux_path)?;
-        let file_len = std::fs::metadata(linux_path)?.len() as usize;
+        let file_len = std::fs::metadata(linux_path).map_err(file_error(linux_path))?.len() as usize;
 
         println!("magic {:#x}, image_size: {}, file_size: {}, text_offset: {:#x}\r", header.magic, header.image_size, file_len, header.text_offset);
         /* Must match the memory node in the DTB. */
