@@ -27,18 +27,26 @@ pub use blk::*;
 pub use net::*;
 
 impl VM {
+    /* Without a disk the slot still answers, as an empty one: the
+     * guest is told about it either way. */
     pub fn init_virtio_blk(&mut self, config: &VmConfig, addr: u64, irq: u32) -> Result<()> {
-        if let Some(disk) = &config.disk {
-            let virtio_blk = VirtioMmio::new(VirtioBlk::new(disk)?, self.fd, irq);
-            self.add_mmio_device(addr, virtio_blk);
+        match &config.disk {
+            Some(disk) => {
+                let virtio_blk = VirtioMmio::new(VirtioBlk::new(disk)?, self.fd, irq);
+                self.add_mmio_device(addr, VIRTIO_MMIO_SIZE, virtio_blk);
+            }
+            None => self.add_mmio_device(addr, VIRTIO_MMIO_SIZE, VirtioPlaceholder::new())
         }
         Ok(())
     }
 
     pub fn init_virtio_net(&mut self, config: &VmConfig, addr: u64, irq: u32) -> Result<()> {
-        if let Some(tap) = &config.tap {
-            let virtio_net = VirtioMmio::new(VirtioNet::new(tap, self.control.clone())?, self.fd, irq);
-            self.add_mmio_device(addr, virtio_net);
+        match &config.tap {
+            Some(tap) => {
+                let virtio_net = VirtioMmio::new(VirtioNet::new(tap, self.control.clone())?, self.fd, irq);
+                self.add_mmio_device(addr, VIRTIO_MMIO_SIZE, virtio_net);
+            }
+            None => self.add_mmio_device(addr, VIRTIO_MMIO_SIZE, VirtioPlaceholder::new())
         }
         Ok(())
     }

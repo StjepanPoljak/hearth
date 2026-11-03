@@ -1,16 +1,20 @@
 use anyhow::Result;
 use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, VmControl, VmConfig, SerialSpec, SerialOut };
-use crate::{ write_le32, read_le32, start_serial };
+use crate::{ write_le32, read_le32, start_serial, VirtioPlaceholder, VIRTIO_MMIO_SIZE };
 use super::arch_update_irq;
 use std::collections::HashMap;
 use std::sync::{ Arc, Mutex, LazyLock };
 
 /* QEMU's virt machine layout, so its device trees describe these: the
- * PL011 on SPI 1, and the first virtio-mmio slot at 0xa000000 on SPI 16
- * (the slots that follow, 0x200 apart, take SPIs 17 and up). */
+ * PL011 on SPI 1, and 32 virtio-mmio slots from 0xa000000, 0x200 apart,
+ * on SPIs 16 and up. virtio-blk takes the first; the guest probes the
+ * others too, so they hold empty placeholders. */
 const UART_MMIO_ADDR: u64 = 0x900_0000;
+const UART_MMIO_SIZE: u64 = 0x1000;
 const UART_IRQ: u32 = 1;
-const VIRTIO_BLK_MMIO_ADDR: u64 = 0xa00_0000;
+const VIRTIO_MMIO_BASE: u64 = 0xa00_0000;
+const VIRTIO_MMIO_SLOTS: u64 = 32;
+const VIRTIO_BLK_MMIO_ADDR: u64 = VIRTIO_MMIO_BASE;
 const VIRTIO_BLK_IRQ: u32 = 16;
 
 pub struct UART {
@@ -38,8 +42,7 @@ impl TTY for UART {
 
 impl MMIODevice for UART {
 
-    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> Result<()> {
-        let mmio_reg = mmio.phys_addr & 0xfff;
+    fn handle(&mut self, mmio_reg: u64, mmio: &mut MMIO, _mem: &GuestMemory) -> Result<()> {
         if (mmio.is_write != 0) && mmio_reg == 0x0 {
             /* we take only first u8 element of data */
             self.out.write(&mmio.data[0..1]);
@@ -119,7 +122,11 @@ impl UART {
 impl VM {
     pub fn arch_init_mmio_devices(&mut self, config: &VmConfig) -> Result<()> {
         let uart = UART::new(self.fd, self.control.clone(), &config.serial)?;
-        self.add_mmio_device(UART_MMIO_ADDR, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
-        self.init_virtio_blk(config, VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ)
+        self.add_mmio_device(UART_MMIO_ADDR, UART_MMIO_SIZE, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
+        self.init_virtio_blk(config, VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ)?;
+        for slot in 1..VIRTIO_MMIO_SLOTS {
+            self.add_mmio_device(VIRTIO_MMIO_BASE + slot * VIRTIO_MMIO_SIZE, VIRTIO_MMIO_SIZE, VirtioPlaceholder::new());
+        }
+        Ok(())
     }
 }

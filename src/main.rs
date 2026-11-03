@@ -39,21 +39,23 @@ use clap::Parser;
 use std::fs::File;
 use std::io::{ self };
 use libc::{ _IOW, _IO };
-use std::collections::HashMap;
+use std::collections::{ BTreeMap, HashMap };
 use std::sync::{ Arc,Mutex };
 use std::sync::atomic::{ AtomicBool, Ordering };
 use std::cell::Cell;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
-type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
+/* By base address: each device's size and the device. */
+type MMIODevices = BTreeMap::<u64, (u64, Arc<Mutex<dyn MMIODevice>>)>;
 type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
 /* Shared, so a device reading guest RAM from a frontend thread keeps
  * its region mapped after the VM is gone. */
 type GuestMemory = Vec<Arc<MemRegion>>;
 
 pub trait MMIODevice: Send {
-    fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> Result<()>;
+    /* `offset` is the access's address relative to the device's base. */
+    fn handle(&mut self, offset: u64, mmio: &mut MMIO, mem: &GuestMemory) -> Result<()>;
     /* Picks up work that arrived from outside the guest, see VmControl::kick(). */
     fn poll(&mut self, _mem: &GuestMemory) -> Result<()> { Ok(()) }
 }
@@ -678,14 +680,24 @@ impl VM {
         self.arch_init_io_devices(vcpu, config)
     }
 
-    fn add_mmio_device(&mut self, addr: u64, device: Arc<Mutex<dyn MMIODevice>>) {
-        self.mmio_devices.insert(addr >> 12, device);
+    /* Places a device at addr..addr + size, which must not overlap another. */
+    fn add_mmio_device(&mut self, addr: u64, size: u64, device: Arc<Mutex<dyn MMIODevice>>) {
+        let overlaps = self.mmio_devices.iter()
+            .any(|(&base, &(len, _))| addr < base + len && base < addr + size);
+        assert!(!overlaps, "MMIO device at {:#x}+{:#x} overlaps another", addr, size);
+        self.mmio_devices.insert(addr, (size, device));
     }
 
+    /* An access to no device reads as 0 and its writes are dropped, as on
+     * a bus with nothing there; otherwise the read would return whatever
+     * the last access left in the buffer. */
     fn handle_mmio(&self, mmio: &mut MMIO) -> Result<()> {
-        let page = mmio.phys_addr >> 12;
-        if let Some(device) = self.mmio_devices.get(&page) {
-            device.lock().unwrap().handle(mmio, &self.guest_memory)?;
+        let addr = mmio.phys_addr;
+        let device = self.mmio_devices.range(..=addr).next_back()
+            .filter(|(&base, &(size, _))| addr + mmio.len as u64 <= base + size);
+        match device {
+            Some((&base, (_, device))) => device.lock().unwrap().handle(addr - base, mmio, &self.guest_memory)?,
+            None => if mmio.is_write == 0 { mmio.data.fill(0) }
         }
         Ok(())
     }
@@ -695,7 +707,7 @@ impl VM {
     }
 
     fn poll_mmio_devices(&self) -> Result<()> {
-        for device in self.mmio_devices.values() {
+        for (_, device) in self.mmio_devices.values() {
             device.lock().unwrap().poll(&self.guest_memory)?;
         }
         Ok(())

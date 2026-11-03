@@ -7,7 +7,11 @@ use std::sync::{ Arc, Mutex };
 
 const VIRTIO_VERSION: u32 = 0x2;
 const VIRTIO_VENDOR_NONE: u32 = 0x0;
-const VIRTIO_MMIO_CONFIG_MAX: u32 = 0xfff;
+/* The register block of one transport: registers up to 0x100, then the
+ * device's config space. */
+pub const VIRTIO_MMIO_SIZE: u64 = 0x200;
+const VIRTIO_MMIO_CONFIG_MAX: u32 = VIRTIO_MMIO_SIZE as u32 - 1;
+const VIRTIO_MAGIC: u32 = u32::from_le_bytes(*b"virt");
 
 /* Device-specific part of a virtio device; VirtioMmio is the transport. */
 pub trait VirtioDevice: Send {
@@ -116,13 +120,12 @@ impl<D: VirtioDevice> VirtioMmio<D> {
 }
 
 impl<D: VirtioDevice> MMIODevice for VirtioMmio<D> {
-    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> Result<()> {
-        let addr = (mmio.phys_addr & 0xfff) as u32;
+    fn handle(&mut self, offset: u64, mmio: &mut MMIO, _mem: &GuestMemory) -> Result<()> {
+        let addr = offset as u32;
         let read = mmio.is_write == 0;
         match (read, addr) {
             (true, VIRTIO_MMIO_MAGIC_VALUE) => {
-                let magic = read_le32(&['v', 'i', 'r', 't'].map(|c| c as u8), 0x0);
-                write_le32(&mut mmio.data, 0, magic);
+                write_le32(&mut mmio.data, 0, VIRTIO_MAGIC);
             },
             (true, VIRTIO_MMIO_VERSION) => {
                 write_le32(&mut mmio.data, 0, VIRTIO_VERSION);
@@ -250,6 +253,32 @@ impl<D: VirtioDevice> MMIODevice for VirtioMmio<D> {
         for queue_idx in 0..VRING_QUEUES_MAX as u32 {
             self.queue_notify(queue_idx, mem)?;
         }
+        Ok(())
+    }
+}
+
+/* A virtio-mmio slot with no device behind it: the spec's device ID 0,
+ * which drivers skip quietly, where reading nothing would make them warn
+ * about a wrong magic value. */
+pub struct VirtioPlaceholder;
+
+impl VirtioPlaceholder {
+    pub fn new() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self))
+    }
+}
+
+impl MMIODevice for VirtioPlaceholder {
+    fn handle(&mut self, offset: u64, mmio: &mut MMIO, _mem: &GuestMemory) -> Result<()> {
+        if mmio.is_write != 0 {
+            return Ok(());
+        }
+        let val = match offset as u32 {
+            VIRTIO_MMIO_MAGIC_VALUE => VIRTIO_MAGIC,
+            VIRTIO_MMIO_VERSION => VIRTIO_VERSION,
+            _ => 0
+        };
+        write_le32(&mut mmio.data, 0, val);
         Ok(())
     }
 }
