@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .allowlist_var("KVMIO")
                 .allowlist_var("KVM_EXIT_.*")
                 .allowlist_var("KVM_INTERNAL_ERROR_.*")
+                .allowlist_var("KVM_SYSTEM_EVENT_.*")
                 .generate_comments(false)
                 .generate()?
                 .write_to_file(out_path.join("kvm-bindings.rs"))?;
@@ -111,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .allowlist_var("KVMIO")
                 .allowlist_var("KVM_EXIT_.*")
                 .allowlist_var("KVM_INTERNAL_ERROR_.*")
+                .allowlist_var("KVM_SYSTEM_EVENT_.*")
                 .allowlist_var("KVM_REG_.*")
                 .allowlist_var("KVM_VGIC_V2_.*")
                 .allowlist_var("KVM_DEV_ARM_VGIC_.*")

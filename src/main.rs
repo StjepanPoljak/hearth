@@ -816,17 +816,32 @@ impl VCPU {
                     }
                     return Err(io::Error::other("KVM internal error."));
                 }
+                KVM_EXIT_SYSTEM_EVENT => {
+                    let event = unsafe { (*run).__bindgen_anon_1.system_event };
+                    match event.type_ {
+                        KVM_SYSTEM_EVENT_SHUTDOWN => {
+                            println!("Guest powered off.\r");
+                            break;
+                        }
+                        /* There is no reset yet: stop as on a power off. */
+                        KVM_SYSTEM_EVENT_RESET => {
+                            println!("Guest asked for a reset; stopping.\r");
+                            break;
+                        }
+                        KVM_SYSTEM_EVENT_CRASH => return Err(io::Error::other("Guest crashed (KVM_SYSTEM_EVENT_CRASH).")),
+                        other => return Err(io::Error::other(format!("Unexpected KVM system event {}.", other)))
+                    }
+                }
                 KVM_EXIT_FAIL_ENTRY => {
                     let fail_entry = unsafe { (*run).__bindgen_anon_1.fail_entry };
                     let reason = fail_entry.hardware_entry_failure_reason;
                     let cpu = fail_entry.cpu;
-                    println!("Fail entry: reason={:#x}, cpu={}", reason, cpu);
                     self.print_regs()?;
-                    break;
+                    return Err(io::Error::other(format!(
+                        "KVM could not enter the guest: hardware entry failure reason {:#x} on CPU {}.", reason, cpu)));
                 }
                 _ => {
-                    println!("EXIT REASON = {}", exit_reason);
-                    break;
+                    return Err(io::Error::other(format!("Unexpected KVM exit reason {}.", exit_reason)));
                 }
             }
         }
