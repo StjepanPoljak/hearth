@@ -73,8 +73,11 @@ impl VmConfig {
 
     /* Checks what only the merged configuration can tell. */
     pub fn validate(&self) -> Result<(), String> {
-        if self.binary.is_some() && self.linux.is_some() {
-            return Err("give either binary or linux, not both".into());
+        match (&self.binary, &self.linux) {
+            (Some(_), Some(_)) => return Err("give either binary or linux, not both".into()),
+            (None, None) => return Err("nothing to run: give --linux or --binary \
+                                        (or linux or binary in the --config file)".into()),
+            _ => ()
         }
         if let Some(memory) = self.memory {
             /* KVM maps guest memory in whole host pages. */
