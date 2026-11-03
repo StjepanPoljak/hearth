@@ -44,6 +44,27 @@ target/debug/hearth --kernel vmlinux --disk rootfs.img
 Disk settings go after the path, e.g.
 `--disk rootfs.img,queue_size=256,seg_max=126` (see `--help`).
 
+The same settings can live in a TOML file, given with `--config vm.toml`.
+Each flag `--foo X` is `foo = X` there, and `--disk`'s settings go in a
+`[disk]` table; flags on the command line override the file. Relative paths
+are taken from the current directory, not the file's.
+
+```toml
+name = "web1"
+kernel = "vmlinux"
+memory = "1G"
+append = "root=/dev/vda"
+serial = "unix:/tmp/web1.sock"
+tap = "tap0"
+
+[disk]
+path = "rootfs.img"
+queue_size = 256
+seg_max = 126
+```
+
+`--break` and `--dirty-log` are debugging aids and stay on the command line.
+
 `--serial` connects the console elsewhere: `pty` (prints the device to open
 with `screen`), `unix:PATH` (a socket for `socat - UNIX-CONNECT:PATH`; output
 from before a client connects is kept, up to 64 KiB) or `file:PATH`.

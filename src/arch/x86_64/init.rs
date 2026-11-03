@@ -1,5 +1,5 @@
 use crate::{ kvm_cpuid2, kvm_cpuid_entry2, kvm_pit_config };
-use crate::{ VCPU, VM, KvmDev, Args, KVMIO, PAGE_SIZE };
+use crate::{ VCPU, VM, KvmDev, VmConfig, KVMIO, PAGE_SIZE };
 use crate::{ read_le64, read_le32, load_elf };
 use libc::{_IOW, _IO, _IOWR};
 
@@ -128,8 +128,8 @@ impl VM {
         Err(io::Error::other(format!("No valid PVH entry found.")))
     }
 
-    fn linux_pvh_boot(&mut self, vcpu: &mut VCPU, args: &Args) -> io::Result<()> {
-        let vmlinux_data = std::fs::read(&args.linux.as_ref().unwrap())?;
+    fn linux_pvh_boot(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
+        let vmlinux_data = std::fs::read(&config.linux.as_ref().unwrap())?;
         let vmlinux = ElfFile64::<Endianness>::parse(&*vmlinux_data)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
@@ -141,7 +141,7 @@ impl VM {
         const HIGH_RAM_START: u64 = 0x1_0000_0000;
 
         /* RAM above MMIO_START moves to 4G so the MMIO hole stays free for devices. */
-        let ram_size = args.memory.unwrap_or(1 << 30) as u64;
+        let ram_size = config.memory.unwrap_or(1 << 30) as u64;
         let linux_mem_idx = self.add_mem_region(ram_size.min(MMIO_START) as usize, 0x0)?;
         if ram_size > MMIO_START {
             self.add_mem_region((ram_size - MMIO_START) as usize, HIGH_RAM_START)?;
@@ -150,7 +150,7 @@ impl VM {
         let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx)?;
 
         let mut cmdline = format!("console=ttyS0,115200 root=/dev/vda virtio_mmio.device=4K@{:#x}:{} virtio_mmio.device=4K@{:#x}:{}", VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ, VIRTIO_NET_MMIO_ADDR, VIRTIO_NET_IRQ);
-        if let Some(append) = &args.append {
+        if let Some(append) = &config.append {
             cmdline = format!("{} {}", cmdline, append);
         }
         /* Boot info goes in low RAM below the EBDA; modules go after the
@@ -160,7 +160,7 @@ impl VM {
         let module_alloc = region.add_bump_allocator(last_addr.next_multiple_of(PAGE_SIZE), ram_size.min(MMIO_START))?;
 
         let mut modlist_entries = vec![];
-        if let Some(initramfs_path) = &args.initramfs {
+        if let Some(initramfs_path) = &config.initramfs {
             /* The module's command line carries its file name, for guests
              * that look modules up by name; Linux ignores it. */
             let module_name = std::path::Path::new(initramfs_path)
@@ -240,7 +240,7 @@ impl VM {
         Ok(())
     }
 
-    pub fn arch_load_linux(&mut self, vcpu: &mut VCPU, args: &Args) -> io::Result<()> {
-        self.linux_pvh_boot(vcpu, args)
+    pub fn arch_load_linux(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
+        self.linux_pvh_boot(vcpu, config)
     }
 }

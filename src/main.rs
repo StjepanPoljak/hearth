@@ -113,6 +113,12 @@ const KVM_RUN: libc::Ioctl = _IO(KVMIO, 0x80);
 #[derive(Parser, Debug)]
 #[command(version, about)]
 pub struct Args {
+    /// Read the VM's settings from this TOML file: each flag --foo X is
+    /// foo = X there, and --disk's settings go in a [disk] table. Flags
+    /// given here override the file's settings
+    #[arg(long, value_name = "FILE")]
+    config: Option<String>,
+
     /// Binary to run
     #[arg(short, long)]
     binary: Option<String>,
@@ -126,9 +132,9 @@ pub struct Args {
     #[arg(short, long, value_parser = parse_mem_size)]
     memory: Option<usize>,
 
-    /// Load address
-    #[arg(short, long, default_value_t = 0x1000)]
-    load_addr: u64,
+    /// Load address [default: 0x1000]
+    #[arg(short, long)]
+    load_addr: Option<u64>,
 
     /// Device tree blob
     #[arg(long)]
@@ -166,8 +172,9 @@ pub struct Args {
     /// Where the serial console goes: stdio (this terminal; Ctrl-A x
     /// quits), pty (prints the device to open with screen or minicom),
     /// file:PATH (output only) or unix:PATH (a socket, one client at a time)
-    #[arg(long, value_parser = parse_serial, default_value = "stdio")]
-    serial: SerialSpec,
+    /// [default: stdio]
+    #[arg(long, value_parser = parse_serial)]
+    serial: Option<SerialSpec>,
 
     /// Name of this VM: the process takes it (as ps and top show it, at
     /// most 15 bytes), so several VMs can be told apart
@@ -186,6 +193,32 @@ pub struct Args {
     /// Repeat for more, at most 4 (x86 only, hardware breakpoints)
     #[arg(long = "break", value_name = "SYMBOL[+OFFSET]|ADDRESS")]
     breakpoints: Vec<String>
+}
+
+impl Args {
+    /* The --config file's settings, overridden by the flags given. */
+    fn vm_config(&self) -> io::Result<VmConfig> {
+        let mut config = match &self.config {
+            Some(path) => VmConfig::load(path)?,
+            None => VmConfig::default()
+        };
+        macro_rules! set {
+            ($($field:ident),*) => {
+                $(if let Some(value) = &self.$field {
+                    config.$field = Some(value.clone());
+                })*
+            }
+        }
+        set!(name, binary, linux, memory, dtb, initramfs, append, disk, tap, vnc);
+        if let Some(load_addr) = self.load_addr {
+            config.load_addr = load_addr;
+        }
+        if let Some(serial) = &self.serial {
+            config.serial = serial.clone();
+        }
+        config.validate().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        Ok(config)
+    }
 }
 
 /* GPA[:SIZE], GPA in hex with 0x or decimal, SIZE as for --memory. */
@@ -616,16 +649,16 @@ impl VM {
         Arc::get_mut(region).ok_or(io::Error::other("Memory region is already shared."))
     }
 
-    fn load_linux(&mut self, vcpu: &mut VCPU, args: &Args) -> io::Result<()> {
-        self.arch_load_linux(vcpu, args)
+    fn load_linux(&mut self, vcpu: &mut VCPU, config: &VmConfig) -> io::Result<()> {
+        self.arch_load_linux(vcpu, config)
     }
 
-    fn init_mmio_devices(&mut self, args: &Args) -> io::Result<()> {
-        self.arch_init_mmio_devices(args)
+    fn init_mmio_devices(&mut self, config: &VmConfig) -> io::Result<()> {
+        self.arch_init_mmio_devices(config)
     }
 
-    fn init_io_devices(&mut self, vcpu: &VCPU, args: &Args) -> io::Result<()> {
-        self.arch_init_io_devices(vcpu, args)
+    fn init_io_devices(&mut self, vcpu: &VCPU, config: &VmConfig) -> io::Result<()> {
+        self.arch_init_io_devices(vcpu, config)
     }
 
     fn add_mmio_device(&mut self, addr: u64, device: Arc<Mutex<dyn MMIODevice>>) {
@@ -861,7 +894,14 @@ fn print_dirty_pages(log: &DirtyLog) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    if let Some(name) = &args.name {
+    let config = match args.vm_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("hearth: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Some(name) = &config.name {
         set_process_name(name)?;
     }
     let kvm_dev = KvmDev::new()?;
@@ -871,25 +911,25 @@ fn main() -> io::Result<()> {
 
     let mut vcpu = vm.create_vcpu(0, kvm_dev.get_kvm_run_size())?;
 
-    match &args.name {
+    match &config.name {
         Some(name) => println!("\nHearth: {}\r", name),
         None => println!("\nHearth\r")
     }
 
     arch::arch_init(&kvm_dev, &mut vm, &mut vcpu)?;
 
-    vcpu.set_ip(args.load_addr as usize)?;
+    vcpu.set_ip(config.load_addr as usize)?;
 
     /* Guest memory is complete before any device (and device thread) exists. */
-    if let Some(_) = args.linux {
-        vm.load_linux(&mut vcpu, &args).unwrap();
-    } else if let Some(binary) = &args.binary {
-        let mem_region_idx = vm.add_mem_region(args.memory.unwrap_or(256 << 10), 0x0)?;
-        vm.load_file_to_memory(mem_region_idx, binary, args.load_addr)?;
+    if let Some(_) = config.linux {
+        vm.load_linux(&mut vcpu, &config).unwrap();
+    } else if let Some(binary) = &config.binary {
+        let mem_region_idx = vm.add_mem_region(config.memory.unwrap_or(256 << 10), 0x0)?;
+        vm.load_file_to_memory(mem_region_idx, binary, config.load_addr)?;
     }
 
     if !args.breakpoints.is_empty() {
-        let elf_data = match &args.linux {
+        let elf_data = match &config.linux {
             Some(path) => Some(std::fs::read(path)?),
             None => None
         };
@@ -906,13 +946,13 @@ fn main() -> io::Result<()> {
      * when the guest stops the VM, so main restores it. */
     let saved_tty = save_tty();
 
-    vm.init_mmio_devices(&args)?;
-    vm.init_io_devices(&vcpu, &args)?;
+    vm.init_mmio_devices(&config)?;
+    vm.init_io_devices(&vcpu, &config)?;
     let dirty_log = match args.dirty_log {
         Some((gpa, size)) => Some(vm.log_dirty_pages(gpa, size)?),
         None => None
     };
-    if let Some(addr) = &args.vnc {
+    if let Some(addr) = &config.vnc {
         start_rfb(addr.as_str(), vm.display.clone(), vm.keyboard.clone())?;
     }
 

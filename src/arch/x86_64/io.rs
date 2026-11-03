@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VM, VCPU, IO, IODevice, KVMIO, TTY, VmControl, Args, SerialSpec, SerialOut, start_serial, kvm_irq_level, gpa_to_host, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
+use crate::{ VM, VCPU, IO, IODevice, KVMIO, TTY, VmControl, VmConfig, SerialSpec, SerialOut, start_serial, kvm_irq_level, gpa_to_host, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
 use std::collections::VecDeque;
@@ -138,8 +138,8 @@ pub enum DeviceId {
 }
 
 impl VM {
-    pub fn arch_init_io_devices(&mut self, vcpu: &VCPU, args: &Args) -> io::Result<()> {
-        let uart = UART::new(self.fd, self.control.clone(), &args.serial)?;
+    pub fn arch_init_io_devices(&mut self, vcpu: &VCPU, config: &VmConfig) -> io::Result<()> {
+        let uart = UART::new(self.fd, self.control.clone(), &config.serial)?;
         self.io_devices.insert(DeviceId::Uart as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
         let i8042 = I8042::new(self.fd, self.control.clone());
         self.io_devices.insert(DeviceId::I8042 as u64, i8042.clone() as Arc<Mutex<dyn IODevice>>);

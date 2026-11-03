@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, VmControl, Args, SerialSpec, SerialOut };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, VmControl, VmConfig, SerialSpec, SerialOut };
 use crate::{ write_le32, read_le32, start_serial };
 use super::arch_update_irq;
 use std::collections::HashMap;
@@ -114,9 +114,9 @@ impl UART {
 }
 
 impl VM {
-    pub fn arch_init_mmio_devices(&mut self, args: &Args) -> io::Result<()> {
-        let uart = UART::new(self.fd, self.control.clone(), &args.serial)?;
+    pub fn arch_init_mmio_devices(&mut self, config: &VmConfig) -> io::Result<()> {
+        let uart = UART::new(self.fd, self.control.clone(), &config.serial)?;
         self.add_mmio_device(UART_MMIO_ADDR, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
-        self.init_virtio_blk(args, VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ)
+        self.init_virtio_blk(config, VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ)
     }
 }
