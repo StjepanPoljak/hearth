@@ -52,9 +52,9 @@ impl vring_desc {
         (self.flags as u32) & VRING_DESC_F_NEXT != 0
     }
 
-    fn get_data(&self,_mem: &GuestMemory) -> &[u8] {
-        let ptr = gpa_to_host(&_mem, self.addr as u64, self.len as usize).unwrap();
-        unsafe { std::slice::from_raw_parts(ptr, self.len as usize) }
+    fn get_data<'a>(&self, mem: &'a GuestMemory) -> io::Result<&'a [u8]> {
+        let ptr = guest_ptr(mem, self.addr, self.len as usize)?;
+        Ok(unsafe { std::slice::from_raw_parts(ptr, self.len as usize) })
     }
 }
 
@@ -74,11 +74,16 @@ impl VringQueue {
         }
     }
 
-    fn get_desc_head(&self, desc_idx: u16, _mem: &GuestMemory) -> vring_desc {
+    /* The guest picks every index and address here, so a bad one is an
+     * error, not a panic. */
+    fn get_desc_head(&self, desc_idx: u16, mem: &GuestMemory) -> io::Result<vring_desc> {
+        if desc_idx as u32 >= self.num {
+            return Err(io::Error::other(format!("Descriptor index {} is outside the {}-entry ring.", desc_idx, self.num)));
+        }
         let vring_desc_size = std::mem::size_of::<vring_desc>() as u64;
         let guest_addr = self.desc + (desc_idx as u64) * vring_desc_size;
-        let desc_head_ptr = gpa_to_host(_mem, guest_addr, vring_desc_size as usize).unwrap();
-        read_guest_ptr::<vring_desc>(desc_head_ptr)
+        let desc_head_ptr = guest_ptr(mem, guest_addr, vring_desc_size as usize)?;
+        Ok(read_guest_ptr::<vring_desc>(desc_head_ptr))
     }
 
     /* Takes the next chain the driver made available, if any. */
@@ -95,7 +100,7 @@ impl VringQueue {
         chain.head = read_guest_ptr::<u16>(unsafe { vring_avail_raw_ptr.add(0x4 + 0x2 * avail_slot) });
         let mut desc_idx = chain.head;
         for _ in 0..self.num {
-            let desc_head = self.get_desc_head(desc_idx, mem);
+            let desc_head = self.get_desc_head(desc_idx, mem)?;
             match desc_head.type_() {
                 DescType::WRITE => {
                     let ptr = guest_ptr(mem, desc_head.addr as u64, desc_head.len as usize)?;
@@ -103,7 +108,7 @@ impl VringQueue {
                         chain.write_buf.push(std::slice::from_raw_parts_mut(ptr, desc_head.len as usize));
                     }
                 },
-                DescType::READ => chain.read_buf.extend_from_slice(desc_head.get_data(mem))
+                DescType::READ => chain.read_buf.extend_from_slice(desc_head.get_data(mem)?)
             };
             if !desc_head.has_next() {
                 break;
