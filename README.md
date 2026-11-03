@@ -41,6 +41,9 @@ Boot a Linux kernel with a root disk; the serial console is your terminal:
 target/debug/hearth --kernel vmlinux --disk rootfs.img
 ```
 
+Disk settings go after the path, e.g.
+`--disk rootfs.img,queue_size=256,seg_max=126` (see `--help`).
+
 `--serial` connects the console elsewhere: `pty` (prints the device to open
 with `screen`), `unix:PATH` (a socket for `socat - UNIX-CONNECT:PATH`; output
 from before a client connects is kept, up to 64 KiB) or `file:PATH`.

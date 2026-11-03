@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VirtioDevice, DescChain, write_le32, new_from };
+use crate::{ VirtioDevice, DescChain, DiskConfig, write_le32, new_from };
 use crate::virtio_bindings::*;
 use std::fs::{ OpenOptions, File };
 use std::os::unix::fs::FileExt;
@@ -24,15 +24,16 @@ impl virtio_blk_outhdr {
 }
 
 impl VirtioBlk {
-    pub fn new(disk: &str, seg_max: Option<u32>, queue_size: u32) -> io::Result<Self> {
+    pub fn new(config: &DiskConfig) -> io::Result<Self> {
+        let DiskConfig { path, queue_size, seg_max } = config;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(disk)
-            .map_err(|e| io::Error::new(e.kind(), format!("Failed to open {}: {}", disk, e)))?;
+            .open(path)
+            .map_err(|e| io::Error::new(e.kind(), format!("Failed to open {}: {}", path, e)))?;
         let capacity = file.metadata()?.len() / SECTOR_SIZE;
 
-        Ok(Self { disk: file, capacity, seg_max, queue_size })
+        Ok(Self { disk: file, capacity, seg_max: *seg_max, queue_size: *queue_size })
     }
 
     /* Checks that `len` bytes from `sector` lie within the disk, returns the byte offset. */

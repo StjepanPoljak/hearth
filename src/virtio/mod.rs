@@ -17,7 +17,7 @@ pub use net::*;
 impl VM {
     pub fn init_virtio_blk(&mut self, args: &Args, addr: u64, irq: u32) -> io::Result<()> {
         if let Some(disk) = &args.disk {
-            let virtio_blk = VirtioMmio::new(VirtioBlk::new(disk, args.blk_seg_max, args.blk_queue_size)?, self.fd, irq);
+            let virtio_blk = VirtioMmio::new(VirtioBlk::new(disk)?, self.fd, irq);
             self.add_mmio_device(addr, virtio_blk);
         }
         Ok(())

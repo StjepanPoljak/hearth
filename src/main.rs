@@ -9,6 +9,9 @@ include!("util/mod.rs");
 include!("arch/mod.rs");
 include!("virtio/mod.rs");
 
+mod config;
+use config::*;
+
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use clap::Parser;
@@ -135,9 +138,17 @@ pub struct Args {
     #[arg(long)]
     initramfs: Option<String>,
 
-    /// Disk path
-    #[arg(long)]
-    disk: Option<String>,
+    /// Disk image, with optional virtio-blk settings after it:
+    /// PATH[,queue_size=N][,seg_max=N]. queue_size is the request queue
+    /// size, offered as QueueNumMax [default: 128]; split rings must be a
+    /// power of 2, and Linux refuses other sizes. seg_max offers
+    /// VIRTIO_BLK_F_SEG_MAX with this many data segments per request
+    /// [default: not offered, the guest uses 1]. Without indirect
+    /// descriptors a request takes seg_max + 2 ring entries, so keep
+    /// seg_max <= queue_size - 2 or the guest can build requests that
+    /// never fit
+    #[arg(long, value_parser = parse_disk, value_name = "PATH[,KEY=VALUE...]")]
+    disk: Option<DiskConfig>,
 
     /// Tap interface name
     #[arg(long)]
@@ -174,20 +185,7 @@ pub struct Args {
     /// +OFFSET, or an address, e.g. start_kernel or 0xffffffff81000000.
     /// Repeat for more, at most 4 (x86 only, hardware breakpoints)
     #[arg(long = "break", value_name = "SYMBOL[+OFFSET]|ADDRESS")]
-    breakpoints: Vec<String>,
-
-    /// Offer VIRTIO_BLK_F_SEG_MAX with this many data segments per
-    /// request. Without indirect descriptors a request takes seg_max + 2
-    /// ring entries, so above --blk-queue-size - 2 the guest can build
-    /// requests that never fit [default: not offered, the guest uses 1]
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-    blk_seg_max: Option<u32>,
-
-    /// Size of the virtio-blk request queue, offered as QueueNumMax.
-    /// Split rings must be a power of 2, and Linux refuses other sizes;
-    /// below 3 no request fits without indirect descriptors
-    #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(1..=32768))]
-    blk_queue_size: u32
+    breakpoints: Vec<String>
 }
 
 /* GPA[:SIZE], GPA in hex with 0x or decimal, SIZE as for --memory. */
