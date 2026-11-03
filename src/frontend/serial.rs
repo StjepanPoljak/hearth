@@ -218,7 +218,9 @@ fn start_tty(uart_async: Arc<Mutex<dyn TTY>>, control: Arc<VmControl>) {
                 };
             }
 
-            uart_async.lock().unwrap().send_char(b).unwrap();
+            /* The byte is queued even if raising the IRQ fails, as in feed():
+             * the guest still finds it, and this thread must not panic. */
+            uart_async.lock().unwrap().send_char(b).ok();
         }
 
         /* A pipe running dry leaves the guest running; a terminal going
