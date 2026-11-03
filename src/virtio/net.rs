@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VirtioDevice, DescChain, VmControl, new_from };
+use crate::{ VirtioDevice, DescChain, GuestError, VmControl, new_from };
 use crate::virtio_bindings::*;
 use std::fs::{ OpenOptions, File };
 use std::io::{ Read, Write };
@@ -91,6 +91,10 @@ impl VirtioDevice for VirtioNet {
         VIRTIO_ID_NET
     }
 
+    fn name(&self) -> &'static str {
+        "virtio-net"
+    }
+
     fn features(&self, sel: u32) -> u32 {
         match sel {
             0 => 0x0,
@@ -116,7 +120,7 @@ impl VirtioDevice for VirtioNet {
         queue != VIRTIO_NET_QUEUE_RX || !self.rx_pending.lock().unwrap().is_empty()
     }
 
-    fn process(&mut self, queue: u32, chain: &mut DescChain) -> io::Result<u32> {
+    fn process(&mut self, queue: u32, chain: &mut DescChain) -> Result<u32, GuestError> {
         match queue {
             VIRTIO_NET_QUEUE_RX => {
                 /* The tap already prepended the virtio_net_hdr, so the frame goes in as is. */
@@ -139,7 +143,7 @@ impl VirtioDevice for VirtioNet {
             },
             VIRTIO_NET_QUEUE_TX => {
                 new_from::<virtio_net_hdr_v1>(&chain.read_buf, 0x0)
-                    .ok_or(io::Error::other("Virtio-net request without header."))?;
+                    .ok_or(GuestError("TX request without header".into()))?;
                 /* The tap takes the virtio_net_hdr in front of the frame. A failed
                  * write (e.g. tap link down) drops the frame instead of the VM. */
                 if let Err(e) = self.tap.write_all(&chain.read_buf) {

@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ MMIO, MMIODevice, GuestMemory, VringQueue, DescChain, VRING_QUEUES_MAX };
+use crate::{ MMIO, MMIODevice, GuestMemory, GuestError, VringQueue, DescChain, VRING_QUEUES_MAX };
 use crate::{ read_le32, write_le32 };
 use crate::arch::arch_update_irq;
 use crate::virtio_bindings::*;
@@ -12,13 +12,17 @@ const VIRTIO_MMIO_CONFIG_MAX: u32 = 0xfff;
 /* Device-specific part of a virtio device; VirtioMmio is the transport. */
 pub trait VirtioDevice: Send {
     fn device_id(&self) -> u32;
+    /* For messages, e.g. "virtio-blk". */
+    fn name(&self) -> &'static str;
     /* Device feature bits for feature word `sel`, transport bits excluded. */
     fn features(&self, sel: u32) -> u32;
     /* 0 means the queue does not exist. */
     fn queue_num_max(&self, queue: u32) -> u32;
     fn read_config(&mut self, offset: u32, data: &mut [u8]) -> io::Result<()>;
-    /* Handles one request and returns the number of bytes written to the guest. */
-    fn process(&mut self, queue: u32, chain: &mut DescChain) -> io::Result<u32>;
+    /* Handles one request and returns the number of bytes written to the
+     * guest. Host failures are the device's to report to the guest, e.g. as
+     * an I/O error status; an Err is the guest's fault and breaks the device. */
+    fn process(&mut self, queue: u32, chain: &mut DescChain) -> Result<u32, GuestError>;
     /* False leaves available chains in the queue, e.g. RX buffers with no frame to fill them. */
     fn can_process(&self, _queue: u32) -> bool { true }
 }
@@ -32,6 +36,9 @@ pub struct VirtioMmio<D: VirtioDevice> {
     vm_fd: libc::c_int,
     irq: u32,
     irq_status: u32,
+    /* Set when the guest broke the device: it shows DEVICE_NEEDS_RESET and
+     * processes nothing until the driver resets it. */
+    needs_reset: bool,
     device: D
 }
 
@@ -46,6 +53,7 @@ impl<D: VirtioDevice> VirtioMmio<D> {
             vm_fd: vm_fd,
             irq: irq,
             irq_status: 0,
+            needs_reset: false,
             device: device
         }))
     }
@@ -55,6 +63,9 @@ impl<D: VirtioDevice> VirtioMmio<D> {
     }
 
     fn queue_notify(&mut self, queue_idx: u32, mem: &GuestMemory) -> io::Result<()> {
+        if self.needs_reset {
+            return Ok(());
+        }
         let Some(queue) = self.queue.get_mut(queue_idx as usize) else {
             return Ok(());
         };
@@ -62,14 +73,45 @@ impl<D: VirtioDevice> VirtioMmio<D> {
             return Ok(());
         }
         while self.device.can_process(queue_idx) {
-            let Some(mut chain) = queue.pop_avail(mem)? else { break; };
-            let len = self.device.process(queue_idx, &mut chain)?;
-            queue.push_used(mem, chain.head, len)?;
-
-            self.irq_status |= VIRTIO_MMIO_INT_VRING;
-            arch_update_irq(1, self.vm_fd, self.irq)?;
+            match Self::process_next(queue, &mut self.device, queue_idx, mem) {
+                Ok(true) => {
+                    self.irq_status |= VIRTIO_MMIO_INT_VRING;
+                    arch_update_irq(1, self.vm_fd, self.irq)?;
+                }
+                Ok(false) => break,
+                Err(e) => return self.fail(e)
+            }
         }
         Ok(())
+    }
+
+    /* Processes the next available chain; false when there is none. */
+    fn process_next(queue: &mut VringQueue, device: &mut D, queue_idx: u32, mem: &GuestMemory) -> Result<bool, GuestError> {
+        let Some(mut chain) = queue.pop_avail(mem)? else { return Ok(false) };
+        let len = device.process(queue_idx, &mut chain)?;
+        queue.push_used(mem, chain.head, len)?;
+        Ok(true)
+    }
+
+    /* The spec has the device set DEVICE_NEEDS_RESET and send a
+     * configuration change notification. */
+    fn fail(&mut self, e: GuestError) -> io::Result<()> {
+        println!("{}: {}; the device needs a reset.\r", self.device.name(), e);
+        self.needs_reset = true;
+        self.irq_status |= VIRTIO_MMIO_INT_CONFIG;
+        arch_update_irq(1, self.vm_fd, self.irq)
+    }
+
+    /* Writing 0 to the status register resets the device. */
+    fn reset(&mut self) -> io::Result<()> {
+        self.dev_feat_sel = 0;
+        self.drv_feat_sel = 0;
+        self.status = 0;
+        self.curr_queue = 0;
+        self.queue = [VringQueue::new(); VRING_QUEUES_MAX];
+        self.irq_status = 0;
+        self.needs_reset = false;
+        arch_update_irq(0, self.vm_fd, self.irq)
     }
 }
 
@@ -154,12 +196,18 @@ impl<D: VirtioDevice> MMIODevice for VirtioMmio<D> {
                 write_le32(&mut mmio.data, 0, ready);
             },
             (true, VIRTIO_MMIO_STATUS) => {
-                write_le32(&mut mmio.data, 0, self.status);
+                let needs_reset = if self.needs_reset { VIRTIO_CONFIG_S_NEEDS_RESET } else { 0 };
+                write_le32(&mut mmio.data, 0, self.status | needs_reset);
             },
             (false, VIRTIO_MMIO_STATUS) => {
-                self.status = read_le32(&mut mmio.data, 0);
-                if self.status & VIRTIO_CONFIG_S_FAILED != 0 {
-                    println!("Warning: Virtio config failed!\r");
+                let status = read_le32(&mut mmio.data, 0);
+                if status == 0 {
+                    self.reset()?;
+                } else {
+                    self.status = status;
+                    if self.status & VIRTIO_CONFIG_S_FAILED != 0 {
+                        println!("Warning: Virtio config failed!\r");
+                    }
                 }
             },
             (false, VIRTIO_MMIO_QUEUE_DESC_LOW) => {

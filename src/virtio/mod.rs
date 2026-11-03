@@ -4,6 +4,18 @@ mod virtio_bindings {
     include!(concat!(env!("OUT_DIR"), "/virtio-ring-bindings.rs"));
 }
 
+/* Something the guest's driver got wrong: a malformed request or a
+ * vring pointing outside guest memory. It breaks only the device it was
+ * sent to, which then needs a reset; the VM keeps running. */
+#[derive(Debug)]
+pub struct GuestError(pub String);
+
+impl std::fmt::Display for GuestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 mod queue;
 mod mmio;
 mod blk;

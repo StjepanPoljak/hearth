@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VirtioDevice, DescChain, DiskConfig, write_le32, new_from };
+use crate::{ VirtioDevice, DescChain, DiskConfig, GuestError, write_le32, new_from };
 use crate::virtio_bindings::*;
 use std::fs::{ OpenOptions, File };
 use std::os::unix::fs::FileExt;
@@ -67,6 +67,10 @@ impl VirtioDevice for VirtioBlk {
         VIRTIO_ID_BLOCK
     }
 
+    fn name(&self) -> &'static str {
+        "virtio-blk"
+    }
+
     fn features(&self, sel: u32) -> u32 {
         match sel {
             0 => (1 << VIRTIO_BLK_F_FLUSH)
@@ -90,13 +94,13 @@ impl VirtioDevice for VirtioBlk {
         Ok(())
     }
 
-    /* Disk errors go back to the guest as VIRTIO_BLK_S_IOERR; only a
-     * malformed request is an error for the VMM. */
-    fn process(&mut self, _queue: u32, chain: &mut DescChain) -> io::Result<u32> {
+    /* Disk errors go back to the guest as VIRTIO_BLK_S_IOERR; a request
+     * with no header or status byte has nowhere to put one. */
+    fn process(&mut self, _queue: u32, chain: &mut DescChain) -> Result<u32, GuestError> {
         let outhdr = new_from::<virtio_blk_outhdr>(&chain.read_buf, 0x0)
-            .ok_or(io::Error::other("Virtio-blk request without header."))?;
+            .ok_or(GuestError("request without header".into()))?;
         let (status, data) = chain.write_buf.split_last_mut()
-            .ok_or(io::Error::other("Virtio-blk request without status byte."))?;
+            .ok_or(GuestError("request without status byte".into()))?;
         let out_data = &chain.read_buf[std::mem::size_of::<virtio_blk_outhdr>()..];
 
         let (res, written) = match outhdr.type_ {

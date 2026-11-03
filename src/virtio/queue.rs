@@ -1,5 +1,4 @@
-use std::io::{ self };
-use crate::{ GuestMemory, gpa_to_host, read_guest_ptr, write_guest_ptr };
+use crate::{ GuestError, GuestMemory, gpa_to_host, read_guest_ptr, write_guest_ptr };
 use crate::virtio_bindings::*;
 use std::sync::atomic::{ Ordering, fence };
 
@@ -52,14 +51,14 @@ impl vring_desc {
         (self.flags as u32) & VRING_DESC_F_NEXT != 0
     }
 
-    fn get_data<'a>(&self, mem: &'a GuestMemory) -> io::Result<&'a [u8]> {
+    fn get_data<'a>(&self, mem: &'a GuestMemory) -> Result<&'a [u8], GuestError> {
         let ptr = guest_ptr(mem, self.addr, self.len as usize)?;
         Ok(unsafe { std::slice::from_raw_parts(ptr, self.len as usize) })
     }
 }
 
-fn guest_ptr(mem: &GuestMemory, gpa: u64, len: usize) -> io::Result<*mut u8> {
-    gpa_to_host(mem, gpa, len).ok_or(io::Error::other(format!("Vring address {:#x} is outside guest memory.", gpa)))
+fn guest_ptr(mem: &GuestMemory, gpa: u64, len: usize) -> Result<*mut u8, GuestError> {
+    gpa_to_host(mem, gpa, len).ok_or(GuestError(format!("vring address {:#x} (+{:#x}) is outside guest memory", gpa, len)))
 }
 
 impl VringQueue {
@@ -76,9 +75,9 @@ impl VringQueue {
 
     /* The guest picks every index and address here, so a bad one is an
      * error, not a panic. */
-    fn get_desc_head(&self, desc_idx: u16, mem: &GuestMemory) -> io::Result<vring_desc> {
+    fn get_desc_head(&self, desc_idx: u16, mem: &GuestMemory) -> Result<vring_desc, GuestError> {
         if desc_idx as u32 >= self.num {
-            return Err(io::Error::other(format!("Descriptor index {} is outside the {}-entry ring.", desc_idx, self.num)));
+            return Err(GuestError(format!("descriptor index {} is outside the {}-entry ring", desc_idx, self.num)));
         }
         let vring_desc_size = std::mem::size_of::<vring_desc>() as u64;
         let guest_addr = self.desc + (desc_idx as u64) * vring_desc_size;
@@ -87,7 +86,7 @@ impl VringQueue {
     }
 
     /* Takes the next chain the driver made available, if any. */
-    pub fn pop_avail<'a>(&mut self, mem: &'a GuestMemory) -> io::Result<Option<DescChain<'a>>> {
+    pub fn pop_avail<'a>(&mut self, mem: &'a GuestMemory) -> Result<Option<DescChain<'a>>, GuestError> {
         let vring_avail_raw_ptr = guest_ptr(mem, self.avail, std::mem::size_of::<vring_avail>() + std::mem::size_of::<u16>() * (self.num as usize))?;
         let avail = read_guest_ptr::<vring_avail>(vring_avail_raw_ptr);
         fence(Ordering::Acquire);
@@ -120,7 +119,7 @@ impl VringQueue {
     }
 
     /* Hands a processed chain back to the driver. */
-    pub fn push_used(&mut self, mem: &GuestMemory, head: u16, len: u32) -> io::Result<()> {
+    pub fn push_used(&mut self, mem: &GuestMemory, head: u16, len: u32) -> Result<(), GuestError> {
         let vring_used_raw_ptr = guest_ptr(mem, self.used, std::mem::size_of::<vring_used>() + std::mem::size_of::<vring_used_elem>() * (self.num as usize))?;
         let used = read_guest_ptr::<vring_used>(vring_used_raw_ptr);
         let used_slot = ((used.idx as u32) % self.num) as usize;
