@@ -58,7 +58,20 @@ const LOAD_ADDR: u64 = 0x40_000_000;
 const INITRAMFS_OFFS: u64 = 0x200_000;
 const KERN_OFFS: u64 = 0x200_000 + INITRAMFS_OFFS;
 
+/* Where the devices start: the GIC distributor, then the PL011 and
+ * virtio (see mmio.rs). */
+const DEVICES_START: u64 = 0x800_0000;
+
 impl VM {
+    /* Guest RAM from 0, for --binary; it must end before the devices.
+     * (Linux gets its RAM at LOAD_ADDR instead.) */
+    pub fn add_ram(&mut self, size: usize) -> Result<usize> {
+        if size as u64 > DEVICES_START {
+            bail!("--memory {:#x} is too big for --binary: RAM from 0 must end below the devices at {:#x}.", size, DEVICES_START);
+        }
+        self.add_mem_region(size, 0x0)
+    }
+
     pub fn setup_irq_device(&mut self) -> Result<()> {
         let mut create_device: kvm_create_device = unsafe { std::mem::zeroed() };
 
@@ -70,7 +83,7 @@ impl VM {
             libc::ioctl(self.fd, KVM_CREATE_DEVICE, &mut create_device)
         })?;
 
-        let dist_addr : u64 = 0x08_000_000;
+        let dist_addr : u64 = DEVICES_START;
         let cpu_addr: u64 = 0x08_010_000;
         let mut dev_attr : kvm_device_attr = unsafe { std::mem::zeroed() };
         dev_attr.group = KVM_DEV_ARM_VGIC_GRP_ADDR;

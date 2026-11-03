@@ -975,7 +975,7 @@ fn run(args: &Args, config: &VmConfig) -> Result<VmExit> {
     if let Some(_) = config.linux {
         vm.load_linux(&mut vcpu, config)?;
     } else if let Some(binary) = &config.binary {
-        let mem_region_idx = vm.add_mem_region(config.memory.unwrap_or(256 << 10), 0x0)?;
+        let mem_region_idx = vm.add_ram(config.memory.unwrap_or(256 << 10))?;
         vm.load_file_to_memory(mem_region_idx, binary, config.load_addr)?;
     }
 

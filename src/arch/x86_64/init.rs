@@ -50,6 +50,23 @@ struct HvmMemmapEntry {
  * (no EPT, say). The address is QEMU's. */
 const TSS_ADDR: u64 = 0xfffb_d000;
 
+/* The hole below 4G that RAM leaves free, for the devices (virtio at
+ * 0xd0000000) and KVM's TSS. */
+const MMIO_START: u64 = 0xc000_0000;
+const HIGH_RAM_START: u64 = 0x1_0000_0000;
+
+impl VM {
+    /* Guest RAM from 0; what doesn't fit below MMIO_START goes at 4G, so
+     * the hole stays free. Returns the low region, which holds address 0. */
+    pub fn add_ram(&mut self, size: usize) -> Result<usize> {
+        let low_idx = self.add_mem_region(size.min(MMIO_START as usize), 0x0)?;
+        if size as u64 > MMIO_START {
+            self.add_mem_region(size - MMIO_START as usize, HIGH_RAM_START)?;
+        }
+        Ok(low_idx)
+    }
+}
+
 /* Where the PVH start info goes, followed by what it points at. */
 const HVM_START_INFO_ADDR: u64 = 0x10000;
 
@@ -124,15 +141,9 @@ impl VM {
 
         const EBDA_START: u64 = 0x9fc00;
         const HIMEM_START: u64 = 0x10_0000;
-        const MMIO_START: u64 = 0xc000_0000;
-        const HIGH_RAM_START: u64 = 0x1_0000_0000;
 
-        /* RAM above MMIO_START moves to 4G so the MMIO hole stays free for devices. */
         let ram_size = config.memory.unwrap_or(1 << 30) as u64;
-        let linux_mem_idx = self.add_mem_region(ram_size.min(MMIO_START) as usize, 0x0)?;
-        if ram_size > MMIO_START {
-            self.add_mem_region((ram_size - MMIO_START) as usize, HIGH_RAM_START)?;
-        }
+        let linux_mem_idx = self.add_ram(ram_size as usize)?;
 
         let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx)?;
 
