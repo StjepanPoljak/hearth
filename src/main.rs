@@ -66,8 +66,43 @@ thread_local! {
 }
 
 /* Per-VM state shared by its vcpu threads and device threads. */
+/* Why the VM stopped, when nothing went wrong. */
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmExit {
+    /* A vcpu ran HLT with interrupts off (x86). */
+    Halted,
+    /* KVM_EXIT_SHUTDOWN: a triple fault, which is also how x86 guests
+     * without another way reset. */
+    TripleFault,
+    /* PSCI SYSTEM_OFF (aarch64). */
+    PoweredOff,
+    /* The guest asked for a reset: PSCI SYSTEM_RESET, or the i8042's
+     * reset line. Hearth has no reset, so it stops. */
+    Reset,
+    /* Ctrl-A x on the terminal. */
+    Quit,
+    /* The terminal the serial console was on went away. */
+    TerminalClosed
+}
+
+impl VmExit {
+    /* What to tell the user; None when they stopped it themselves. */
+    fn message(&self) -> Option<&'static str> {
+        match self {
+            VmExit::Halted => Some("Guest halted."),
+            VmExit::TripleFault => Some("Guest triple-faulted (KVM_EXIT_SHUTDOWN): a reset or a crash."),
+            VmExit::PoweredOff => Some("Guest powered off."),
+            VmExit::Reset => Some("Guest asked for a reset, which Hearth doesn't do; stopped."),
+            VmExit::Quit => None,
+            VmExit::TerminalClosed => Some("Terminal closed; stopped.")
+        }
+    }
+}
+
 pub struct VmControl {
     should_stop: AtomicBool,
+    /* The first reason given to stop(). */
+    exit: Mutex<Option<VmExit>>,
     devices_pending: AtomicBool,
     /* Threads currently in VCPU::run(), the targets of kick_signal(). */
     vcpu_threads: Mutex<Vec<libc::pthread_t>>
@@ -77,13 +112,21 @@ impl VmControl {
     fn new() -> Self {
         Self {
             should_stop: AtomicBool::new(false),
+            exit: Mutex::new(None),
             devices_pending: AtomicBool::new(false),
             vcpu_threads: Mutex::new(vec![])
         }
     }
 
-    /* Makes every vcpu thread leave its run loop. */
-    pub fn stop(&self) {
+    /* Makes every vcpu thread leave its run loop; the VM's exit is the
+     * first reason given. */
+    pub fn stop(&self, exit: VmExit) {
+        self.exit.lock().unwrap().get_or_insert(exit);
+        self.halt_vcpus();
+    }
+
+    /* Stops the vcpus without a reason, when an error will say why. */
+    fn halt_vcpus(&self) {
         self.should_stop.store(true, Ordering::SeqCst);
         for tid in self.vcpu_threads.lock().unwrap().iter() {
             unsafe { libc::pthread_kill(*tid, kick_signal()); }
@@ -684,8 +727,9 @@ impl VM {
     }
 
     /* Runs each vcpu on its own thread until the VM stops. The first vcpu
-     * to leave its run loop stops the others; the first error is returned. */
-    fn run(self, vcpus: Vec<VCPU>) -> io::Result<()> {
+     * to leave its run loop stops the others; the first error is returned,
+     * or else why the VM stopped. */
+    fn run(self, vcpus: Vec<VCPU>) -> io::Result<VmExit> {
         unsafe { install_kick_handler() };
 
         let vm = Arc::new(self);
@@ -697,12 +741,16 @@ impl VM {
                 .name(format!("vcpu{}", vcpu.id))
                 .spawn(move || {
                     let res = vcpu.run(&vm_thread);
-                    vm_thread.control.stop();
+                    match res {
+                        Ok(Some(exit)) => vm_thread.control.stop(exit),
+                        Ok(None) => (),
+                        Err(_) => vm_thread.control.halt_vcpus()
+                    }
                     res
                 });
             match thread {
                 Ok(thread) => threads.push(thread),
-                Err(e) => { vm.control.stop(); res = Err(e); break; }
+                Err(e) => { vm.control.halt_vcpus(); res = Err(e); break; }
             }
         }
 
@@ -710,10 +758,13 @@ impl VM {
             let thread_res = thread.join()
                 .unwrap_or_else(|_| Err(io::Error::other("vCPU thread panicked.")));
             if res.is_ok() {
-                res = thread_res;
+                res = thread_res.map(|_| ());
             }
         }
-        res
+        res?;
+        /* Without an error, every vcpu left because stop() was called. */
+        let exit = *vm.control.exit.lock().unwrap();
+        Ok(exit.expect("vcpus stopped without a reason"))
     }
 }
 
@@ -755,7 +806,8 @@ impl VCPU {
     }
 
     /* Runs the vcpu on the calling thread until it exits or the VM stops. */
-    fn run(&mut self, vm: &VM) -> io::Result<()> {
+    /* None when the vcpu left because the VM was stopped from elsewhere. */
+    fn run(&mut self, vm: &VM) -> io::Result<Option<VmExit>> {
         KVM_RUN_PTR.set(self.kvm_run_mem as *mut kvm_run);
         vm.control.register_vcpu_thread();
         let res = self.run_loop(vm);
@@ -764,12 +816,12 @@ impl VCPU {
         res
     }
 
-    fn run_loop(&mut self, vm: &VM) -> io::Result<()> {
+    fn run_loop(&mut self, vm: &VM) -> io::Result<Option<VmExit>> {
         let run = self.kvm_run_mem as *mut kvm_run;
 
         loop {
             if vm.control.should_stop() {
-                break;
+                return Ok(None);
             }
             if vm.control.take_devices_pending() {
                 vm.poll_mmio_devices()?;
@@ -795,9 +847,9 @@ impl VCPU {
                     vm.handle_io(&io, self.kvm_run_mem as *mut u8)?;
                 }
                 KVM_EXIT_SHUTDOWN => {
-                    println!("Guest shutdown.");
                     self.print_regs()?;
-                    break; }
+                    return Ok(Some(VmExit::TripleFault));
+                }
                 KVM_EXIT_MMIO => {
                     let mmio = unsafe { &mut (*run).__bindgen_anon_1.mmio };
                     vm.handle_mmio(mmio)?
@@ -805,9 +857,7 @@ impl VCPU {
                 KVM_EXIT_DEBUG => {
                     self.handle_debug_exit()?;
                 }
-                KVM_EXIT_HLT => {
-                    println!("Guest halted.");
-                    break; }
+                KVM_EXIT_HLT => return Ok(Some(VmExit::Halted)),
                 KVM_EXIT_INTERNAL_ERROR => {
                     let internal = unsafe { (*run).__bindgen_anon_1.internal };
                     println!("suberror: {:#x}", internal.suberror);
@@ -819,15 +869,8 @@ impl VCPU {
                 KVM_EXIT_SYSTEM_EVENT => {
                     let event = unsafe { (*run).__bindgen_anon_1.system_event };
                     match event.type_ {
-                        KVM_SYSTEM_EVENT_SHUTDOWN => {
-                            println!("Guest powered off.\r");
-                            break;
-                        }
-                        /* There is no reset yet: stop as on a power off. */
-                        KVM_SYSTEM_EVENT_RESET => {
-                            println!("Guest asked for a reset; stopping.\r");
-                            break;
-                        }
+                        KVM_SYSTEM_EVENT_SHUTDOWN => return Ok(Some(VmExit::PoweredOff)),
+                        KVM_SYSTEM_EVENT_RESET => return Ok(Some(VmExit::Reset)),
                         KVM_SYSTEM_EVENT_CRASH => return Err(io::Error::other("Guest crashed (KVM_SYSTEM_EVENT_CRASH).")),
                         other => return Err(io::Error::other(format!("Unexpected KVM system event {}.", other)))
                     }
@@ -845,8 +888,6 @@ impl VCPU {
                 }
             }
         }
-
-        Ok(())
     }
 }
 
@@ -918,13 +959,18 @@ fn main() {
     if let Some(tty) = saved_tty {
         restore_tty(&tty);
     }
-    if let Err(e) = res {
-        eprintln!("hearth: {}", e);
-        std::process::exit(1);
+    match res {
+        Ok(exit) => if let Some(message) = exit.message() {
+            println!("{}", message);
+        },
+        Err(e) => {
+            eprintln!("hearth: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
-fn run(args: &Args, config: &VmConfig) -> io::Result<()> {
+fn run(args: &Args, config: &VmConfig) -> io::Result<VmExit> {
     if let Some(name) = &config.name {
         set_process_name(name)?;
     }

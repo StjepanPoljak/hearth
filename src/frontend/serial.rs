@@ -5,7 +5,7 @@ use std::fs::{ File, OpenOptions };
 use std::os::fd::{ AsRawFd, FromRawFd, RawFd };
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixListener;
-use crate::VmControl;
+use crate::{ VmControl, VmExit };
 use std::sync::{ Arc, Mutex };
 use std::collections::VecDeque;
 
@@ -227,7 +227,7 @@ fn start_tty(uart_async: Arc<Mutex<dyn TTY>>, control: Arc<VmControl>) {
          * away doesn't. */
         if quit || raw.is_some() {
             drop(raw);
-            control.stop();
+            control.stop(if quit { VmExit::Quit } else { VmExit::TerminalClosed });
         }
     });
 }

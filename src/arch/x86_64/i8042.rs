@@ -1,7 +1,7 @@
 use std::io::{ self };
 use std::collections::VecDeque;
 use std::sync::{ Arc, Mutex };
-use crate::{ IO, IODevice, Keyboard, VmControl, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
+use crate::{ IO, IODevice, Keyboard, VmControl, VmExit, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 use super::io::arch_update_irq;
 
 /* The PS/2 controller (8042) with a keyboard on its first port and
@@ -138,9 +138,8 @@ impl I8042 {
             CMD_KBD_DISABLE => self.config |= CONFIG_KBD_DISABLE,
             CMD_KBD_ENABLE => self.config &= !CONFIG_KBD_DISABLE,
             CMD_PULSE_RESET => {
-                /* The classic PC reboot. There is no reset to go through, so stop. */
-                println!("Guest reset through the i8042.\r");
-                self.control.stop();
+                /* The classic PC reboot. */
+                self.control.stop(VmExit::Reset);
             },
             /* Commands for the absent second port go unanswered, which
              * is how a guest tells that nothing is there. */
