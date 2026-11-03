@@ -777,12 +777,14 @@ impl VCPU {
 
             let ret = unsafe { libc::ioctl(self.fd, KVM_RUN, 0usize) };
             if ret < 0 {
-                if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                /* Taken first: print_regs() makes ioctls of its own. */
+                let e = io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EINTR) {
                     unsafe { std::ptr::write_volatile(&mut (*run).immediate_exit, 0); }
                     continue;
                 }
                 self.print_regs()?;
-                return Err(io::Error::last_os_error());
+                return Err(io::Error::new(e.kind(), format!("KVM_RUN: {}", e)));
             }
 
             let exit_reason = unsafe { (*run).exit_reason };
