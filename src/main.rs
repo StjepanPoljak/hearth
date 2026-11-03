@@ -1,3 +1,22 @@
+/* std's print macros panic when the output is gone, as in `hearth | head`
+ * once head exits: Rust ignores SIGPIPE, so the write fails with EPIPE.
+ * Hearth must keep running the guest, and must not die of SIGPIPE either,
+ * as a VNC or serial socket client may go away too. So these shadow std's
+ * for the whole crate and drop what can't be written. */
+macro_rules! println {
+    ($($arg:tt)*) => {{ use std::io::Write; let _ = writeln!(std::io::stdout(), $($arg)*); }}
+}
+macro_rules! print {
+    ($($arg:tt)*) => {{ use std::io::Write; let _ = write!(std::io::stdout(), $($arg)*); }}
+}
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{ use std::io::Write; let _ = writeln!(std::io::stderr(), $($arg)*); }}
+}
+#[allow(unused_macros)]
+macro_rules! eprint {
+    ($($arg:tt)*) => {{ use std::io::Write; let _ = write!(std::io::stderr(), $($arg)*); }}
+}
+
 #[allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 mod kvm_bindings {
     include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
