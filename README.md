@@ -91,6 +91,28 @@ socat -,raw,echo=0,escape=0x1d UNIX-CONNECT:vms/vm1.sock   # Ctrl-] detaches
 `--tap` attaches VM *i* to `tap`*i*, which `sudo ./make-tap.sh up tap`*i*
 creates. Ctrl-C stops them all.
 
+## Tests
+
+```sh
+cargo test
+```
+
+runs the unit tests. The test guests in `guests/` are small bare-metal
+programs for x86 that check Hearth from inside a VM. Each one has a
+`run.sh` that assembles it with nasm, boots it with `target/debug/hearth`
+(or `HEARTH=...`), and prints an `ok:` or `FAIL:` line per check:
+
+- `guests/virtio-needs-reset/run.sh`: the guest hands virtio-blk a
+  descriptor outside its memory. Hearth must mark only that device
+  DEVICE_NEEDS_RESET, raise a config interrupt, and keep the VM running.
+  The guest's reset of the device must then clear it.
+- `guests/high-memory/run.sh`: with `--memory 5G`, the guest enters long
+  mode and writes RAM below the 3G–4G device hole, at 4G and up to 6G,
+  then reads it back. The hole and the area past the end of RAM must not
+  be RAM.
+
+They need `/dev/kvm`, and so don't run in `cargo test`.
+
 ## Doom
 
 `guests/doom` is doomgeneric with a small libc and a PVH entry stub, drawing
