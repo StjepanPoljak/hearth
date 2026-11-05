@@ -2,16 +2,17 @@ use anyhow::{ anyhow, bail, Context, Result };
 use crate::{ KvmDev, VCPU, VM, VmConfig };
 use crate::{ read_le32, read_le64, open_file };
 
+use super::plic::{ PLIC, PLIC_MMIO_ADDR };
+
 use std::io::Read;
 
 pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, _vm: &mut VM) -> Result<()> {
     Ok(())
 }
 
-/* RISC-V vcpus need no init ioctl, and there is no in-kernel irqchip
- * without AIA (see io.rs). */
-pub fn arch_init(_kvm_dev: &KvmDev, _vm: &mut VM, _vcpu: &mut VCPU) -> Result<()> {
-    Ok(())
+/* RISC-V vcpus need no init ioctl. The PLIC interrupts the one vcpu. */
+pub fn arch_init(_kvm_dev: &KvmDev, _vm: &mut VM, vcpu: &mut VCPU) -> Result<()> {
+    PLIC.lock().unwrap().set_vcpu(vcpu.fd)
 }
 
 /* Documentation/arch/riscv/boot-image-header.rst */
@@ -41,9 +42,9 @@ const LOAD_ADDR: u64 = 0x8000_0000;
 const KERN_OFFS: u64 = 0x20_0000;
 const INITRAMFS_OFFS: u64 = 0x800_0000;
 
-/* Where the devices start: QEMU virt's PLIC (not emulated yet), then the
- * UART and virtio (see mmio.rs). */
-const DEVICES_START: u64 = 0xc00_0000;
+/* Where the devices start: the PLIC, then the UART and virtio (see
+ * mmio.rs). */
+const DEVICES_START: u64 = PLIC_MMIO_ADDR;
 
 impl VM {
     /* Guest RAM from 0, for --binary; it must end before the devices.

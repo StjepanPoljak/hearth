@@ -1,16 +1,12 @@
-use anyhow::{ bail, Result };
+use anyhow::Result;
 use crate::{ VM, VCPU, IO, VmConfig };
+use super::plic::PLIC;
 
 /* RISC-V KVM has no in-kernel irqchip except AIA, which needs the host
- * to have Ssaia. The portable way is a PLIC emulated here, raising the
- * vcpu's external interrupt with KVM_INTERRUPT, as kvmtool does. Until
- * then a raised line is an error rather than a lost interrupt; lowering
- * one is trivially done. */
+ * to have Ssaia, so the PLIC is emulated here (see plic.rs). `num` is
+ * the PLIC source, as in the device tree's interrupts property. */
 pub fn arch_update_irq(level: u32, _vm_fd: libc::c_int, num: u32) -> Result<()> {
-    if level != 0 {
-        bail!("Interrupt {} raised, but riscv64 has no interrupt controller yet.", num);
-    }
-    Ok(())
+    PLIC.lock().unwrap().set_level(num, level != 0)
 }
 
 impl VM {

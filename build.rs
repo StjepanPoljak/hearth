@@ -140,11 +140,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .allowlist_var("KVM_CAP_COALESCED_PIO")
                 .allowlist_type("kvm_one_reg")
                 .allowlist_type("kvm_run")
+                .allowlist_type("kvm_interrupt")
                 .allowlist_var("KVMIO")
                 .allowlist_var("KVM_EXIT_.*")
                 .allowlist_var("KVM_INTERNAL_ERROR_.*")
                 .allowlist_var("KVM_SYSTEM_EVENT_.*")
                 .allowlist_var("KVM_REG_.*")
+                .allowlist_var("KVM_INTERRUPT_.*")
                 .generate_comments(false)
                 .generate()?
                 .write_to_file(out_path.join("kvm-bindings.rs"))?;

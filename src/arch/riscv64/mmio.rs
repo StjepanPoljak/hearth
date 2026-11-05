@@ -2,6 +2,7 @@ use anyhow::Result;
 use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, VmControl, VmConfig, SerialSpec, SerialOut };
 use crate::{ start_serial, VirtioPlaceholder, VIRTIO_MMIO_SIZE };
 use super::arch_update_irq;
+use super::plic::{ PLIC, PLIC_MMIO_ADDR, PLIC_MMIO_SIZE };
 use std::collections::VecDeque;
 use std::sync::{ Arc, Mutex };
 
@@ -136,6 +137,7 @@ impl MMIODevice for UART {
 
 impl VM {
     pub fn arch_init_mmio_devices(&mut self, config: &VmConfig) -> Result<()> {
+        self.add_mmio_device(PLIC_MMIO_ADDR, PLIC_MMIO_SIZE, PLIC.clone() as Arc<Mutex<dyn MMIODevice>>);
         let uart = UART::new(self.fd, self.control.clone(), &config.serial)?;
         self.add_mmio_device(UART_MMIO_ADDR, UART_MMIO_SIZE, uart as Arc<Mutex<dyn MMIODevice>>);
         self.init_virtio_blk(config, VIRTIO_MMIO_BASE, VIRTIO_BLK_IRQ)?;
