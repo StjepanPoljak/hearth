@@ -122,7 +122,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .write_to_file(out_path.join("kvm-bindings.rs"))?;
 
             virtio_bindings(&out_path, &[format!("--target={target}"),
-                                         "-I/usr/aarch64-linux-gnu/include".to_string()])?;
+                                         "-I/usr/aarch64-linux-gnu/include".to_string()])?; }
+
+        /* Rust calls it riscv64gc, clang riscv64. */
+        "riscv64gc-unknown-linux-gnu" => {
+            let clang_target = "--target=riscv64-unknown-linux-gnu".to_string();
+            bindgen::Builder::default()
+                .header("/usr/include/linux/kvm.h")
+                .clang_arg(&clang_target)
+                .clang_arg("-I/usr/riscv64-linux-gnu/include")
+                .allowlist_type("kvm_userspace_memory_region")
+                .allowlist_type("kvm_dirty_log")
+                .allowlist_var("KVM_MEM_LOG_DIRTY_PAGES")
+                .allowlist_type("kvm_coalesced_mmio_zone")
+                .allowlist_type("kvm_coalesced_mmio_ring")
+                .allowlist_var("KVM_COALESCED_MMIO_PAGE_OFFSET")
+                .allowlist_var("KVM_CAP_COALESCED_PIO")
+                .allowlist_type("kvm_one_reg")
+                .allowlist_type("kvm_run")
+                .allowlist_var("KVMIO")
+                .allowlist_var("KVM_EXIT_.*")
+                .allowlist_var("KVM_INTERNAL_ERROR_.*")
+                .allowlist_var("KVM_SYSTEM_EVENT_.*")
+                .allowlist_var("KVM_REG_.*")
+                .generate_comments(false)
+                .generate()?
+                .write_to_file(out_path.join("kvm-bindings.rs"))?;
+
+            virtio_bindings(&out_path, &[clang_target,
+                                         "-I/usr/riscv64-linux-gnu/include".to_string()])?;
         }
         _ => ()
     }
