@@ -3,21 +3,23 @@
 </p>
 
 Hearth is a small virtual machine monitor for Linux KVM, written in Rust
-from scratch. It boots Linux on x86_64 and aarch64, and on x86 it also runs
+from scratch. It boots Linux on x86_64, aarch64 and riscv64, and on x86 it also runs
 bare-metal Doom.
 
 ## Devices
 
-| | x86_64 | aarch64 |
-|---|---|---|
-| Boot | PVH ELF (`vmlinux`), modules via `--initramfs` | `Image` with a device tree |
-| Serial console | 16550 UART | UART |
-| Block | virtio-blk (MMIO) | virtio-blk (MMIO) |
-| Network | virtio-net (MMIO) on a tap | |
-| Keyboard | i8042 (PS/2) | |
-| Display | VGA mode 13h, served over VNC | |
+| | x86_64 | aarch64 | riscv64 |
+|---|---|---|---|
+| Boot | PVH ELF (`vmlinux`), modules via `--initramfs` | `Image` with a device tree | `Image` with a device tree |
+| Serial console | 16550 UART | UART | 16550 UART |
+| Block | virtio-blk (MMIO) | virtio-blk (MMIO) | virtio-blk (MMIO) |
+| Network | virtio-net (MMIO) on a tap | | |
+| Keyboard | i8042 (PS/2) | | |
+| Display | VGA mode 13h, served over VNC | | |
 
-The guest gets one vcpu.
+The guest gets one vcpu. On riscv64 Hearth emulates a PLIC for
+interrupts, and the device layout is QEMU virt's;
+`guests/nested/hearth-riscv64.dts` is a device tree for it.
 
 ## Building
 
@@ -25,10 +27,11 @@ The guest gets one vcpu.
 cargo build
 ```
 
-For aarch64, build the cross-compilation image once, then build inside it:
+For aarch64 or riscv64, build the cross-compilation image once, then build
+inside it:
 
 ```sh
-./docker-build.sh aarch64
+./docker-build.sh aarch64      # or riscv64
 ./docker-run.sh aarch64
 ```
 
@@ -112,6 +115,11 @@ programs for x86 that check Hearth from inside a VM. Each one has a
   be RAM.
 
 They need `/dev/kvm`, and so don't run in `cargo test`.
+
+`guests/nested/run-riscv64.sh [--disk] KERNEL` tests riscv64 without
+RISC-V hardware: QEMU (TCG, with the hypervisor extension) runs Hearth,
+which boots the same kernel. `--disk` also checks virtio-blk and its
+interrupts. The script's header says how to build the kernel.
 
 ## Doom
 
