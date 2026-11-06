@@ -202,7 +202,8 @@ pub struct Args {
     #[arg(short, long)]
     load_addr: Option<u64>,
 
-    /// Device tree blob
+    /// Device tree blob for --linux on aarch64; on riscv64 Hearth makes
+    /// one for the VM, and this replaces it
     #[arg(long)]
     dtb: Option<String>,
 
@@ -226,7 +227,9 @@ pub struct Args {
     #[arg(long)]
     tap: Option<String>,
 
-    /// Extra kernel command line arguments (x86; on aarch64 the DTB has them)
+    /// Kernel command line arguments (on x86 extra ones; on riscv64 the
+    /// device tree's bootargs, unless --dtb is given; on aarch64 the DTB
+    /// has them)
     #[arg(long, allow_hyphen_values = true)]
     append: Option<String>,
 
@@ -373,13 +376,15 @@ impl MemRegion {
         let region_end = self.guest_phys_addr + self.mem_size as u64;
         if gpa_start > gpa_end || gpa_start < self.guest_phys_addr || gpa_end > region_end {
             bail!("Allocator {:#x}..{:#x} is not inside region {:#x}..{:#x}.",
-                                                gpa_start, gpa_end, self.guest_phys_addr, region_end);
+                  gpa_start, gpa_end, self.guest_phys_addr, region_end);
         }
         if let Some(other) = self.allocators.iter().find(|a| gpa_start < a.gpa_end() && a.gpa_start() < gpa_end) {
             bail!("Allocator {:#x}..{:#x} overlaps {:#x}..{:#x}.",
-                                                gpa_start, gpa_end, other.gpa_start(), other.gpa_end());
+                  gpa_start, gpa_end, other.gpa_start(), other.gpa_end());
         }
-        let host_start = unsafe { (self.mem_ptr as *mut u8).add((gpa_start - self.guest_phys_addr) as usize) };
+        let host_start = unsafe {
+            (self.mem_ptr as *mut u8).add((gpa_start - self.guest_phys_addr) as usize)
+        };
         self.allocators.push(BumpAllocator::new(gpa_start, gpa_end, host_start));
         Ok(self.allocators.len() - 1)
     }

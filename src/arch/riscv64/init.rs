@@ -1,8 +1,9 @@
 use anyhow::{ anyhow, bail, Context, Result };
 use crate::{ KvmDev, VCPU, VM, VmConfig };
-use crate::{ read_le32, read_le64, open_file };
+use crate::{ read_le32, read_le64, open_file, read_file };
 
 use super::plic::{ PLIC, PLIC_MMIO_ADDR };
+use super::fdt::{ create_fdt, FdtParams };
 
 use std::io::Read;
 
@@ -37,7 +38,7 @@ fn get_linux_header(path: &str) -> Result<RiscvImageHeader> {
 
 /* QEMU virt's RAM base. Linux's RAM starts here: the device tree at the
  * base, the kernel 2M in (rv64 wants it 2M aligned), the initramfs at
- * 128M. The DTB's memory node and linux,initrd-start/end must match. */
+ * 128M. A --dtb's memory node and linux,initrd-start/end must match. */
 const LOAD_ADDR: u64 = 0x8000_0000;
 const KERN_OFFS: u64 = 0x20_0000;
 const INITRAMFS_OFFS: u64 = 0x800_0000;
@@ -68,17 +69,31 @@ impl VM {
         if config.initramfs.is_some() && (mem_size as u64) <= INITRAMFS_OFFS {
             bail!("--memory {:#x} is too small: the initramfs goes at {:#x} into RAM.", mem_size, INITRAMFS_OFFS);
         }
-        /* Must match the memory node in the DTB. */
         let linux_mem_idx = self.add_mem_region(mem_size, LOAD_ADDR)?;
 
-        match &config.dtb {
-            Some(dtb_path) => { self.load_file_to_memory(linux_mem_idx, dtb_path, 0x0)?; },
-            None => { bail!("Could not find device tree blob."); }
-        }
+        let initrd = match &config.initramfs {
+            Some(initramfs_path) => {
+                let size = self.load_file_to_memory(linux_mem_idx, initramfs_path, INITRAMFS_OFFS)?;
+                Some((LOAD_ADDR + INITRAMFS_OFFS, LOAD_ADDR + INITRAMFS_OFFS + size as u64))
+            },
+            None => None
+        };
 
-        if let Some(initramfs_path) = &config.initramfs {
-            self.load_file_to_memory(linux_mem_idx, initramfs_path, INITRAMFS_OFFS)?;
+        /* A --dtb as it is, or one describing this VM. */
+        let dtb = match &config.dtb {
+            Some(dtb_path) => read_file(dtb_path)?,
+            None => create_fdt(&FdtParams {
+                mem_start: LOAD_ADDR,
+                mem_size: mem_size as u64,
+                bootargs: config.append.as_deref().unwrap_or(""),
+                initrd,
+                virtio_blk: config.disk.is_some()
+            })?
+        };
+        if dtb.len() as u64 > KERN_OFFS {
+            bail!("The device tree ({:#x} bytes) does not fit below the kernel at {:#x}.", dtb.len(), KERN_OFFS);
         }
+        self.load_data_to_memory(linux_mem_idx, dtb, 0x0)?;
 
         self.load_file_to_memory(linux_mem_idx, linux_path, KERN_OFFS)?;
 

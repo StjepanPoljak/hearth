@@ -10,7 +10,7 @@ bare-metal Doom.
 
 | | x86_64 | aarch64 | riscv64 |
 |---|---|---|---|
-| Boot | PVH ELF (`vmlinux`), modules via `--initramfs` | `Image` with a device tree | `Image` with a device tree |
+| Boot | PVH ELF (`vmlinux`), modules via `--initramfs` | `Image` with a device tree | `Image`; Hearth makes the device tree |
 | Serial console | 16550 UART | UART | 16550 UART |
 | Block | virtio-blk (MMIO) | virtio-blk (MMIO) | virtio-blk (MMIO) |
 | Network | virtio-net (MMIO) on a tap | | |
@@ -18,8 +18,9 @@ bare-metal Doom.
 | Display | VGA mode 13h, served over VNC | | |
 
 The guest gets one vcpu. On riscv64 Hearth emulates a PLIC for
-interrupts, and the device layout is QEMU virt's;
-`guests/nested/hearth-riscv64.dts` is a device tree for it.
+interrupts, and the device layout is QEMU virt's. Hearth makes the
+device tree there itself, with `--memory`, `--initramfs`, `--disk` and
+`--append` (its bootargs) in it; `--dtb` gives one to use instead.
 
 ## Building
 

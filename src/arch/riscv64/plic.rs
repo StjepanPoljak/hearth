@@ -12,7 +12,7 @@ const KVM_INTERRUPT: libc::Ioctl = _IOW::<kvm_interrupt>(KVMIO, 0x86);
 pub const PLIC_MMIO_ADDR: u64 = 0xc00_0000;
 pub const PLIC_MMIO_SIZE: u64 = 0x40_0000;
 /* Sources 1 to 31 (riscv,ndev = 31); 0 means none. */
-const PLIC_SOURCES: usize = 32;
+pub(super) const PLIC_SOURCES: usize = 32;
 
 const PRIORITY_BASE: u64 = 0x0;
 const PENDING_BASE: u64 = 0x1000;

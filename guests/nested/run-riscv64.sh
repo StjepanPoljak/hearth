@@ -1,11 +1,13 @@
 #!/bin/sh
 # run.sh for riscv64, under TCG: QEMU's virt machine, with the hypervisor
 # extension, boots KERNEL from an initramfs whose /init is a static
-# riscv64 Hearth, which boots the same KERNEL with hearth-riscv64.dts and
-# an initramfs whose /init (hello-riscv64.S) prints a line and reboots.
+# riscv64 Hearth, which boots the same KERNEL, with a device tree Hearth
+# makes, and an initramfs whose /init (hello-riscv64.S) prints a line and
+# reboots.
 # Hearth then exits, and the outer kernel's "Attempted to kill init" panic
 # makes QEMU quit. Everything after "--" on QEMU's kernel command line is
-# Hearth's argv.
+# Hearth's argv; the kernel keeps a double-quoted value, spaces and all,
+# in one argument.
 #
 # With --disk, Hearth gets a 1M disk whose sector 0 holds a line written
 # here, and the inner /init is disk-riscv64.S instead: it reads sector 0,
@@ -21,11 +23,10 @@
 #     M="make -C $S O=$PWD/$O ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu-"
 #     $M defconfig && echo CONFIG_KVM=y > $O/kvm.config &&
 #     $S/scripts/kconfig/merge_config.sh -m -O $O $O/.config $O/kvm.config &&
-#     $M olddefconfig && $M -j$(nproc) Image scripts_dtc'
-# which gives build/riscv-linux/arch/riscv/boot/Image, and the dtc this
-# needs in build/riscv-linux/scripts/dtc/dtc (or set DTC; default: dtc on
-# PATH). Needs the riscv64-hearth-build image (./docker-build.sh riscv64)
-# and qemu-system-riscv64. Build output goes to build/nested-riscv64.
+#     $M olddefconfig && $M -j$(nproc) Image'
+# which gives build/riscv-linux/arch/riscv/boot/Image. Needs the
+# riscv64-hearth-build image (./docker-build.sh riscv64) and
+# qemu-system-riscv64. Build output goes to build/nested-riscv64.
 
 set -e
 DISK=
@@ -41,7 +42,6 @@ KERNEL=$(realpath "$1")
 DIR=$(realpath "$(dirname "$0")")
 ROOT=$(realpath "$DIR/../..")
 OUT=$ROOT/build/nested-riscv64
-DTC=${DTC:-dtc}
 mkdir -p "$OUT"
 
 if [ -n "$DISK" ]; then INIT=disk; else INIT=hello; fi
@@ -61,16 +61,8 @@ HEARTH=$ROOT/target/riscv64gc-unknown-linux-gnu/release/hearth
 python3 -I "$DIR/mkcpio.py" "$OUT/inner.cpio" \
     dev/ dev/console:c:5:1 proc/ init="$OUT/$INIT"
 
-# Hearth puts the initramfs at 0x88000000 (src/arch/riscv64/init.rs).
-MEMORY=256M
-INITRD_END=$(printf '%#x' $((0x88000000 + $(stat -c %s "$OUT/inner.cpio"))))
-sed -e "s/MEMORY_SIZE/0x10000000/" \
-    -e "s/INITRD_END/$INITRD_END/" \
-    -e 's/BOOTARGS/"console=ttyS0 earlycon panic=-1"/' \
-    "$DIR/hearth-riscv64.dts" > "$OUT/hearth.dts"
-"$DTC" -q -I dts -O dtb -o "$OUT/hearth.dtb" "$OUT/hearth.dts"
-
-HEARTH_ARGS="--linux /Image --dtb /hearth.dtb --initramfs /inner.cpio --memory $MEMORY"
+HEARTH_ARGS="--linux /Image --initramfs /inner.cpio --memory 256M"
+HEARTH_ARGS="$HEARTH_ARGS --append=\"console=ttyS0 earlycon panic=-1\""
 DISK_FILES=
 if [ -n "$DISK" ]; then
     # A 62-byte line (with its \n), as disk-riscv64.S prints sector 0.
@@ -83,7 +75,7 @@ fi
 
 python3 -I "$DIR/mkcpio.py" "$OUT/outer.cpio" \
     dev/ dev/console:c:5:1 dev/kvm:c:10:232 \
-    init="$HEARTH" Image="$KERNEL" hearth.dtb="$OUT/hearth.dtb" \
+    init="$HEARTH" Image="$KERNEL" \
     inner.cpio="$OUT/inner.cpio" $DISK_FILES
 
 run_qemu() {

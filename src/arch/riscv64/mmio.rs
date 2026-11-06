@@ -11,13 +11,13 @@ use std::sync::{ Arc, Mutex };
  * from 0x10001000, 0x1000 apart, on interrupts 1 to 8. virtio-blk takes
  * the first; the guest probes the others too, so they hold empty
  * placeholders. */
-const UART_MMIO_ADDR: u64 = 0x1000_0000;
-const UART_MMIO_SIZE: u64 = 0x100;
-const UART_IRQ: u32 = 10;
-const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
-const VIRTIO_MMIO_STRIDE: u64 = 0x1000;
+pub(super) const UART_MMIO_ADDR: u64 = 0x1000_0000;
+pub(super) const UART_MMIO_SIZE: u64 = 0x100;
+pub(super) const UART_IRQ: u32 = 10;
+pub(super) const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
+pub(super) const VIRTIO_MMIO_STRIDE: u64 = 0x1000;
 const VIRTIO_MMIO_SLOTS: u64 = 8;
-const VIRTIO_BLK_IRQ: u32 = 1;
+pub(super) const VIRTIO_BLK_IRQ: u32 = 1;
 
 /* A 16550 like x86's (arch/x86_64/io.rs), on MMIO: registers 0 to 7. */
 pub struct UART {
