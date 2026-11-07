@@ -4,6 +4,8 @@
 # riscv64 Hearth, which boots the same KERNEL, with a device tree Hearth
 # makes, and an initramfs whose /init (hello-riscv64.S) prints a line and
 # reboots.
+# With --binary, Hearth runs hello-bare-riscv64.S instead, a raw binary
+# with no Linux: it writes to the UART and shuts down through SBI.
 # Hearth then exits, and the outer kernel's "Attempted to kill init" panic
 # makes QEMU quit. Everything after "--" on QEMU's kernel command line is
 # Hearth's argv; the kernel keeps a double-quoted value, spaces and all,
@@ -15,9 +17,11 @@
 # /proc/interrupts. This then prints an ok: or FAIL: line per check, and
 # exits 1 if any failed.
 #
-# Usage: guests/nested/run-riscv64.sh [--disk] KERNEL
+# Usage: guests/nested/run-riscv64-hearth.sh [--linux [--disk] | --binary] KERNEL
+# (--linux is the default.)
 #
-# KERNEL is a riscv64 Image with KVM built in, e.g. from a clean tree:
+# KERNEL, the outer kernel (and with --linux, the inner one too), is a
+# riscv64 Image with KVM built in, e.g. from a clean tree:
 #   docker run --rm -v "$PWD":/w -w /w riscv64-hearth-build sh -c '
 #     S=build/linux-src; O=build/riscv-linux
 #     M="make -C $S O=$PWD/$O ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu-"
@@ -29,13 +33,18 @@
 # qemu-system-riscv64. Build output goes to build/nested-riscv64.
 
 set -e
+MODE=linux
 DISK=
-if [ "$1" = --disk ]; then
-    DISK=1
-    shift
-fi
-if [ -z "$1" ]; then
-    echo "(!) Usage: $0 [--disk] KERNEL" >&2
+while :; do
+    case "$1" in
+        --linux) MODE=linux; shift ;;
+        --binary) MODE=binary; shift ;;
+        --disk) DISK=1; shift ;;
+        *) break ;;
+    esac
+done
+if [ -z "$1" ] || { [ -n "$DISK" ] && [ $MODE = binary ]; }; then
+    echo "(!) Usage: $0 [--linux [--disk] | --binary] KERNEL" >&2
     exit 1
 fi
 KERNEL=$(realpath "$1")
@@ -44,10 +53,12 @@ ROOT=$(realpath "$DIR/../..")
 OUT=$ROOT/build/nested-riscv64
 mkdir -p "$OUT"
 
-if [ -n "$DISK" ]; then INIT=disk; else INIT=hello; fi
+if [ $MODE = binary ]; then INIT=hello-bare
+elif [ -n "$DISK" ]; then INIT=disk
+else INIT=hello; fi
 
-# Static Hearth and the inner init, built in the cross image as
-# docker-run.sh does it.
+# Static Hearth and the inner init (or the bare binary), built in the
+# cross image as docker-run.sh does it.
 docker run --rm -v "$ROOT":/home/docker/hearth -w /home/docker/hearth \
     -e RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" \
     -e CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc \
@@ -55,14 +66,20 @@ docker run --rm -v "$ROOT":/home/docker/hearth -w /home/docker/hearth \
         set -e
         cargo build --release --target=riscv64gc-unknown-linux-gnu
         riscv64-linux-gnu-as -o build/nested-riscv64/$INIT.o guests/nested/$INIT-riscv64.S
-        riscv64-linux-gnu-ld -static -o build/nested-riscv64/$INIT build/nested-riscv64/$INIT.o"
+        riscv64-linux-gnu-ld -static -Ttext=0x1000 -o build/nested-riscv64/$INIT build/nested-riscv64/$INIT.o
+        riscv64-linux-gnu-objcopy -O binary build/nested-riscv64/$INIT build/nested-riscv64/$INIT.bin"
 HEARTH=$ROOT/target/riscv64gc-unknown-linux-gnu/release/hearth
 
-python3 -I "$DIR/mkcpio.py" "$OUT/inner.cpio" \
-    dev/ dev/console:c:5:1 proc/ init="$OUT/$INIT"
-
-HEARTH_ARGS="--linux /Image --initramfs /inner.cpio --memory 256M"
-HEARTH_ARGS="$HEARTH_ARGS --append=\"console=ttyS0 earlycon panic=-1\""
+if [ $MODE = binary ]; then
+    HEARTH_ARGS="--binary /hello.bin"
+    GUEST_FILES="hello.bin=$OUT/$INIT.bin"
+else
+    python3 -I "$DIR/mkcpio.py" "$OUT/inner.cpio" \
+        dev/ dev/console:c:5:1 proc/ init="$OUT/$INIT"
+    HEARTH_ARGS="--linux /Image --initramfs /inner.cpio --memory 256M"
+    HEARTH_ARGS="$HEARTH_ARGS --append=\"console=ttyS0 earlycon panic=-1\""
+    GUEST_FILES="Image=$KERNEL inner.cpio=$OUT/inner.cpio"
+fi
 DISK_FILES=
 if [ -n "$DISK" ]; then
     # A 62-byte line (with its \n), as disk-riscv64.S prints sector 0.
@@ -75,8 +92,7 @@ fi
 
 python3 -I "$DIR/mkcpio.py" "$OUT/outer.cpio" \
     dev/ dev/console:c:5:1 dev/kvm:c:10:232 \
-    init="$HEARTH" Image="$KERNEL" \
-    inner.cpio="$OUT/inner.cpio" $DISK_FILES
+    init="$HEARTH" $GUEST_FILES $DISK_FILES
 
 run_qemu() {
     qemu-system-riscv64 -machine virt -cpu rv64,h=true -m 1G -nographic -no-reboot \

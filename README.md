@@ -117,10 +117,11 @@ programs for x86 that check Hearth from inside a VM. Each one has a
 
 They need `/dev/kvm`, and so don't run in `cargo test`.
 
-`guests/nested/run-riscv64.sh [--disk] KERNEL` tests riscv64 without
-RISC-V hardware: QEMU (TCG, with the hypervisor extension) runs Hearth,
-which boots the same kernel. `--disk` also checks virtio-blk and its
-interrupts. The script's header says how to build the kernel.
+`guests/nested/run-riscv64-hearth.sh [--linux [--disk] | --binary] KERNEL`
+tests riscv64 without RISC-V hardware: QEMU (TCG, with the hypervisor
+extension) runs Hearth, which boots the same kernel. `--disk` also checks
+virtio-blk and its interrupts. `--binary` boots a bare-metal hello world
+instead of Linux. The script's header says how to build the kernel.
 
 ## Doom
 

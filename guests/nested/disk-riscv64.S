@@ -1,7 +1,7 @@
 # init for the innermost Linux on riscv64 with --disk: read sector 0 of
 # /dev/vda, write sector 1 and read it back, all O_DIRECT so each goes
 # through virtio-blk rather than the page cache. Prints what it reads,
-# then /proc/interrupts, then reboots; run-riscv64.sh --disk checks it.
+# then /proc/interrupts, then reboots; run-riscv64-hearth.sh --disk checks it.
         .macro sys n
         li a7, \n
         ecall
