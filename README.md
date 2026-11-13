@@ -135,3 +135,19 @@ make -C guests/doom run
 
 then connect a VNC client to 127.0.0.1:5900 (`make run VNC=...` to change
 it). The Makefile fetches doomgeneric and Freedoom into `build/`.
+
+## Licence
+
+Copyright © 2026 Stjepan Poljak.
+
+Hearth is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version. See [LICENSE](LICENSE).
+
+If you run a modified Hearth as a network service, the AGPL requires you
+to offer its source code to the people who use it.
+
+Companies that want to use Hearth without the AGPL's terms need a
+commercial licence, agreed with the author and every contributor whose
+code it covers. See [CONTRIBUTING.md](CONTRIBUTING.md).
